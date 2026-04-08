@@ -531,10 +531,26 @@ class MotionScoreHRpQCTWidget(ScriptedLoadableModuleWidget):
     def _license_decrypt_key(self):
         return str(self._settings().value("MotionScore/ModelDecryptKey", "") or "").strip()
 
-    def _set_license_session(self, token, decrypt_key):
+    def _license_session_email(self):
+        return str(self._settings().value("MotionScore/LicenseSessionEmail", "") or "").strip().lower()
+
+    def _license_session_key(self):
+        return str(self._settings().value("MotionScore/LicenseSessionKey", "") or "").strip()
+
+    def _clear_license_session(self):
+        s = self._settings()
+        s.setValue("MotionScore/LicenseToken", "")
+        s.setValue("MotionScore/ModelDecryptKey", "")
+        s.setValue("MotionScore/LicenseSessionEmail", "")
+        s.setValue("MotionScore/LicenseSessionKey", "")
+        self._update_setup_status()
+
+    def _set_license_session(self, token, decrypt_key, *, email="", license_key=""):
         s = self._settings()
         s.setValue("MotionScore/LicenseToken", str(token).strip())
         s.setValue("MotionScore/ModelDecryptKey", str(decrypt_key).strip())
+        s.setValue("MotionScore/LicenseSessionEmail", str(email).strip().lower())
+        s.setValue("MotionScore/LicenseSessionKey", str(license_key).strip())
         self._update_setup_status()
 
     def _default_device_hash(self):
@@ -613,6 +629,13 @@ class MotionScoreHRpQCTWidget(ScriptedLoadableModuleWidget):
 
     def _license_ready(self):
         return bool(self._license_token() and self._license_decrypt_key())
+
+    def _license_session_matches_form(self):
+        form_email = self.licenseEmailEdit.text.strip().lower()
+        form_key = self.licenseKeyEdit.text.strip()
+        if not form_email or not form_key:
+            return False
+        return (form_email == self._license_session_email()) and (form_key == self._license_session_key())
 
     def _python_executable_for_setup(self):
         return (
@@ -753,7 +776,13 @@ class MotionScoreHRpQCTWidget(ScriptedLoadableModuleWidget):
         4) Download models (if not available)
         """
         self._persist_license_settings()
-        if self._core_package_ready() and self._license_ready() and self._has_local_models():
+
+        if (
+            self._core_package_ready()
+            and self._license_ready()
+            and self._license_session_matches_form()
+            and self._has_local_models()
+        ):
             self._set_license_status("Setup already complete (package, license, models).")
             self._log("[setup] skipped: already ready\n")
             return
@@ -761,6 +790,12 @@ class MotionScoreHRpQCTWidget(ScriptedLoadableModuleWidget):
         if not self._ensure_core_package():
             return
 
+        # If user changed email/key, invalidate prior activation session.
+        if self._license_ready() and not self._license_session_matches_form():
+            self._log("[license] detected email/key change; clearing previous activation session\n")
+            self._clear_license_session()
+
+        # Empty key means user explicitly wants a signup (new/reissued key).
         if not self.licenseKeyEdit.text.strip():
             if not self.onLicenseSignup():
                 return
@@ -890,7 +925,12 @@ class MotionScoreHRpQCTWidget(ScriptedLoadableModuleWidget):
                 raise RuntimeError("Missing token in activation response")
             if not decrypt_key:
                 raise RuntimeError("Missing model_decrypt_key in activation response")
-            self._set_license_session(token=token, decrypt_key=decrypt_key)
+            self._set_license_session(
+                token=token,
+                decrypt_key=decrypt_key,
+                email=email,
+                license_key=license_key,
+            )
             lic = res.get("license", {})
             expires_txt = ""
             if isinstance(lic, dict):
