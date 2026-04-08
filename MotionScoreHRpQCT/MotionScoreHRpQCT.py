@@ -219,6 +219,9 @@ class MotionScoreHRpQCTWidget(ScriptedLoadableModuleWidget):
         self.quickSetupButton = qt.QPushButton("One-Click Setup")
         licenseLayout.addWidget(self.quickSetupButton)
 
+        self.forceReinstallButton = qt.QPushButton("Force Reinstall Package")
+        licenseLayout.addWidget(self.forceReinstallButton)
+
         self.licenseFlowHelpLabel = qt.QLabel(
             "Fill Name/Institution/Email, click One-Click Setup. "
             "It installs/updates core package, requests key, activates, and downloads models automatically."
@@ -427,6 +430,7 @@ class MotionScoreHRpQCTWidget(ScriptedLoadableModuleWidget):
         self.refreshButton.clicked.connect(self.onRefreshReview)
         self.exportButton.clicked.connect(self.onExport)
         self.quickSetupButton.clicked.connect(self.onQuickSetup)
+        self.forceReinstallButton.clicked.connect(self.onForceReinstallPackage)
         self.backButton.clicked.connect(self.onBackToPreviousScan)
         self.clearButton.clicked.connect(self.onClearGrades)
         self.loadScanButton.clicked.connect(self.onLoadSelectedScan)
@@ -645,13 +649,15 @@ class MotionScoreHRpQCTWidget(ScriptedLoadableModuleWidget):
             or shutil.which("python")
         )
 
-    def _pip_install(self, *packages, upgrade=False):
+    def _pip_install(self, *packages, upgrade=False, extra_args=None):
         python_exe = self._python_executable_for_setup()
         if not python_exe:
             raise RuntimeError("Could not find Python executable for pip install.")
         cmd = [python_exe, "-m", "pip", "install"]
         if upgrade:
             cmd.append("--upgrade")
+        if extra_args:
+            cmd.extend(str(a) for a in extra_args if str(a).strip())
         cmd.extend(str(p) for p in packages if str(p).strip())
         if len(cmd) <= 4:
             return
@@ -688,6 +694,28 @@ class MotionScoreHRpQCTWidget(ScriptedLoadableModuleWidget):
             )
             return False
 
+    def onForceReinstallPackage(self):
+        try:
+            self._set_license_status("Reinstalling MotionScore core package from PyPI...")
+            self._pip_install(
+                CORE_PYPI_PACKAGE,
+                upgrade=True,
+                extra_args=["--force-reinstall", "--no-cache-dir"],
+            )
+            if not self._core_package_ready():
+                raise RuntimeError("Package reinstall completed but import check failed.")
+            self._set_license_status("Core package reinstall complete.")
+            self._log(f"[setup] core package force-reinstalled: {CORE_PYPI_PACKAGE}\n")
+        except Exception as exc:
+            self._set_license_status(f"Core package reinstall failed: {exc}")
+            slicer.util.errorDisplay(
+                "Force reinstall failed.\n\n"
+                f"Package: {CORE_PYPI_PACKAGE}\n"
+                f"Error: {exc}"
+            )
+        finally:
+            self._update_setup_status()
+
     def _update_setup_status(self):
         if not hasattr(self, "setupStatusLabel"):
             return
@@ -708,6 +736,7 @@ class MotionScoreHRpQCTWidget(ScriptedLoadableModuleWidget):
         self.backButton.enabled = bool(enabled and self._grade_history)
         self.clearButton.enabled = enabled
         self.quickSetupButton.enabled = enabled
+        self.forceReinstallButton.enabled = enabled
         self.trainingModeCheck.enabled = enabled
         self.runScopeCombo.enabled = enabled
         self.reviewScopeCombo.enabled = enabled

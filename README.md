@@ -26,6 +26,7 @@ This scripted module provides the full extension workflow:
 
 1. Set `Dataset Root`.
 2. Click `One-Click Setup` once (installs `motionscorehrpqct` from PyPI, activates license, downloads models).
+   - Optional: use `Force Reinstall Package` in `License` if you need to refresh a broken/outdated local install.
 3. Click `Run Predict` (torch backend).
 4. In `Review`, enter reviewer ID once.
 5. For each scan, click quick grade (`Grade 1..5`) to save and advance.
