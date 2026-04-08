@@ -6,7 +6,7 @@ No known related patents.
 
 License: MIT (see [LICENSE.txt](LICENSE.txt)).
 
-![SlicerMotionScoreHRpQCT screenshot](resources/screenshot-slicer-motion-score.png)
+![SlicerMotionScoreHRpQCT screenshot](resources/ScreenshotMotionScoreHRpQCT.png)
 
 ## Module Overview
 
