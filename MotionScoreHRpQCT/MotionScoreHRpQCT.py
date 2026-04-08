@@ -32,6 +32,7 @@ MODULE_VERSION = "0.1.0"
 DEFAULT_LICENSE_API = "https://motionscore-license-api.matthias-walle.workers.dev"
 LICENSE_HTTP_USER_AGENT = "MotionScoreSlicer/0.1 (+3D-Slicer; Python urllib)"
 CORE_PYPI_PACKAGE = "motionscorehrpqct"
+CORE_PIP_CONSTRAINTS = ("numpy<2.0",)
 
 
 class MotionScoreHRpQCT(ScriptedLoadableModule):
@@ -674,13 +675,16 @@ class MotionScoreHRpQCTWidget(ScriptedLoadableModuleWidget):
         if int(completed.returncode) != 0:
             raise RuntimeError(f"pip install failed (exit {completed.returncode}).")
 
+    def _core_pip_requirements(self):
+        return [CORE_PYPI_PACKAGE, *CORE_PIP_CONSTRAINTS]
+
     def _ensure_core_package(self):
         if self._core_package_ready():
             self._log(f"[setup] core package already installed: {CORE_PYPI_PACKAGE}\n")
             return True
         try:
             self._set_license_status("Installing MotionScore core package from PyPI...")
-            self._pip_install(CORE_PYPI_PACKAGE)
+            self._pip_install(*self._core_pip_requirements())
             if not self._core_package_ready():
                 raise RuntimeError("Installed package but 'motionscore' import still failed.")
             self._log(f"[setup] core package install ok: {CORE_PYPI_PACKAGE}\n")
@@ -698,7 +702,7 @@ class MotionScoreHRpQCTWidget(ScriptedLoadableModuleWidget):
         try:
             self._set_license_status("Reinstalling MotionScore core package from PyPI...")
             self._pip_install(
-                CORE_PYPI_PACKAGE,
+                *self._core_pip_requirements(),
                 upgrade=True,
                 extra_args=["--force-reinstall", "--no-cache-dir"],
             )
@@ -1934,7 +1938,7 @@ class MotionScoreHRpQCTWidget(ScriptedLoadableModuleWidget):
                 self._slice_observer_node.RemoveObserver(self._slice_observer_tag)
             self._slice_observer_node = slice_node
             self._slice_observer_tag = slice_node.AddObserver(
-                slicer.vtkMRMLSliceNode.ModifiedEvent,
+                vtk.vtkCommand.ModifiedEvent,
                 self._on_slice_position_changed,
             )
         except Exception as exc:
