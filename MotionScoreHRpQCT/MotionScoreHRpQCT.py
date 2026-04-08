@@ -252,7 +252,10 @@ class MotionScoreHRpQCTWidget(ScriptedLoadableModuleWidget):
 
         runButtonsRow = qt.QHBoxLayout()
         self.runButton = qt.QPushButton("Run Predict")
+        self.interruptButton = qt.QPushButton("Interrupt")
+        self.interruptButton.enabled = False
         runButtonsRow.addWidget(self.runButton)
+        runButtonsRow.addWidget(self.interruptButton)
         runLayout.addLayout(runButtonsRow)
 
         self.progressLabel = qt.QLabel("Idle")
@@ -275,8 +278,6 @@ class MotionScoreHRpQCTWidget(ScriptedLoadableModuleWidget):
 
         self.runScopeCombo = qt.QComboBox()
         self.runScopeCombo.addItem(self.RUN_SCOPE_ALL)
-        self.interruptButton = qt.QPushButton("Interrupt")
-        self.interruptButton.enabled = False
         self.refreshButton = qt.QPushButton("Refresh Review")
         self.exportButton = qt.QPushButton("Export Final Grades")
 
@@ -406,7 +407,6 @@ class MotionScoreHRpQCTWidget(ScriptedLoadableModuleWidget):
         additionalLayout.addLayout(additionalForm)
 
         additionalRunButtons = qt.QHBoxLayout()
-        additionalRunButtons.addWidget(self.interruptButton)
         additionalRunButtons.addWidget(self.refreshButton)
         additionalLayout.addLayout(additionalRunButtons)
 
