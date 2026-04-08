@@ -6,7 +6,7 @@ This file tracks compliance for the Slicer extension checklist.
 
 - [x] Reasonable extension name (`SlicerMotionScoreHRpQCT` repository, module `MotionScoreHRpQCT`)
 - [x] Repository naming follows `Slicer+ExtensionName`
-- [ ] GitHub topic `3d-slicer-extension` is set on repository (GitHub web setting)
+- [x] GitHub topic `3d-slicer-extension` is set on repository
 - [x] Extension description is 1-2 sentences and non-expert friendly
 - [x] Known patents statement included (`No known related patents`)
 - [x] `LICENSE.txt` present at repository root
@@ -28,13 +28,12 @@ This file tracks compliance for the Slicer extension checklist.
 - [x] Core documentation and usage tutorial provided in `README.md`
 - [ ] Sample tutorial data registration in Sample Data module (future improvement)
 - [x] GUI/logic separation maintained in scripted module structure
-- [x] Automated CI packaging checks exist in `.github/workflows/ci.yml`
+- [ ] Automated CI packaging checks (intentionally disabled; manual packaging currently used)
 - [ ] Validate package build artifacts on all platforms in extension index CI environment
 - [ ] Maintainer responsiveness expectations are process commitments (issues/PRs/forum mentions)
 - [x] Permissive license used (MIT)
 
 ## Manual GitHub Actions Required
 
-1. Add repository topic `3d-slicer-extension`.
-2. Hide unused repository features in GitHub settings.
-3. Keep issue/PR/forum response expectations documented in CONTRIBUTING or issue templates if desired.
+1. Hide unused repository features in GitHub settings.
+2. Keep issue/PR/forum response expectations documented in CONTRIBUTING or issue templates if desired.

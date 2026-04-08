@@ -6,6 +6,10 @@ No known related patents.
 
 License: MIT (see [LICENSE.txt](LICENSE.txt)).
 
+Repositories:
+- Slicer extension (this repo): https://github.com/wallematthias/SlicerMotionScoreHRpQCT
+- Core pipeline: https://github.com/wallematthias/MotionScoreHRpQCT
+
 ![SlicerMotionScoreHRpQCT screenshot](resources/ScreenshotMotionScoreHRpQCT.png)
 
 ## Module Overview
@@ -32,7 +36,7 @@ Output path:
 
 ## Core Pipeline Contract
 
-This extension is GUI-only and delegates persistent data processing to `MotionScoreCNN`:
+This extension is GUI-only and delegates persistent data processing to the core repository `MotionScoreHRpQCT`:
 - `motionscore predict`
 - `motionscore review-init`
 - `motionscore review-apply`
@@ -56,16 +60,16 @@ https://doi.org/10.1016/j.bone.2022.116607
 ## Developer Install
 
 1. Clone this repository.
-2. Register module path:
-   - `"/Applications/Slicer.app/Contents/MacOS/Slicer" --no-splash --no-main-window --python-script "<repo>/scripts/link_local_module.py"`
+2. Register module path using Slicer's embedded Python environment:
+   - Launch Slicer and run from the Python interactor:
+   - `exec(open(r"<repo>/scripts/link_local_module.py").read(), {"__name__": "__main__"})`
+   - Or run from a terminal with your platform-specific Slicer launcher:
+   - `"<SLICER_LAUNCHER>" --no-splash --no-main-window --python-script "<repo>/scripts/link_local_module.py"`
 3. Restart Slicer and open module `MotionScoreHRpQCT`.
-4. Install core package in Slicer Python:
-   - `"/Applications/Slicer.app/Contents/bin/PythonSlicer" -m pip install -e "<path-to>/MotionScoreCNN"`
+4. Install the core package into Slicer's Python (platform-agnostic):
+   - `"<SLICER_PYTHON>" -m pip install -e "<path-to>/MotionScoreHRpQCT"`
+   - where `<SLICER_PYTHON>` is your Slicer Python executable (for example `PythonSlicer`).
 
 ## CI/CD
 
-- `CI` workflow validates:
-  - module Python syntax,
-  - extension metadata JSON,
-  - packaged extension archive build.
-- `Release` workflow publishes tagged extension artifacts (`v*` tags).
+This repository intentionally has no CI workflows. Packaging and release checks are run manually.
