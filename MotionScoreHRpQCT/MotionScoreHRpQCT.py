@@ -278,6 +278,12 @@ class MotionScoreHRpQCTWidget(ScriptedLoadableModuleWidget):
 
         self.runScopeCombo = qt.QComboBox()
         self.runScopeCombo.addItem(self.RUN_SCOPE_ALL)
+        self.deviceCombo = qt.QComboBox()
+        self.deviceCombo.addItems(["auto", "mps", "cpu", "cuda"])
+        saved_device = str(self._settings().value("MotionScore/TorchDevice", "auto") or "auto").strip().lower()
+        if saved_device not in {"auto", "mps", "cpu", "cuda"}:
+            saved_device = "auto"
+        self.deviceCombo.setCurrentText(saved_device)
         self.refreshButton = qt.QPushButton("Refresh Review")
         self.exportButton = qt.QPushButton("Export Final Grades")
 
@@ -402,6 +408,7 @@ class MotionScoreHRpQCTWidget(ScriptedLoadableModuleWidget):
         additionalForm = qt.QFormLayout()
         additionalForm.addRow("Confidence Threshold", self.confidenceSpin)
         additionalForm.addRow("Training Mode", self.trainingModeCheck)
+        additionalForm.addRow("Torch Device", self.deviceCombo)
         additionalForm.addRow("Run Scope", self.runScopeCombo)
         additionalForm.addRow("Auto Load", self.autoLoadCheck)
         additionalLayout.addLayout(additionalForm)
@@ -446,6 +453,7 @@ class MotionScoreHRpQCTWidget(ScriptedLoadableModuleWidget):
         self.licenseInstitutionEdit.editingFinished.connect(self._persist_license_settings)
         self.licenseEmailEdit.editingFinished.connect(self._persist_license_settings)
         self.licenseKeyEdit.editingFinished.connect(self._persist_license_settings)
+        self.deviceCombo.currentTextChanged.connect(self._persist_runtime_settings)
 
         self._install_grading_shortcuts()
 
@@ -477,6 +485,9 @@ class MotionScoreHRpQCTWidget(ScriptedLoadableModuleWidget):
 
     def _persist_reviewer_setting(self):
         self._settings().setValue("MotionScore/Reviewer", self.reviewerEdit.text.strip())
+
+    def _persist_runtime_settings(self):
+        self._settings().setValue("MotionScore/TorchDevice", self._combo_text(self.deviceCombo))
 
     def _install_grading_shortcuts(self):
         parent_widget = self.parent if isinstance(self.parent, qt.QWidget) else slicer.util.mainWindow()
@@ -889,6 +900,9 @@ class MotionScoreHRpQCTWidget(ScriptedLoadableModuleWidget):
             "--output-root",
             dataset,
         ]
+        selected_device = (self._combo_text(self.deviceCombo) or "auto").lower()
+        if selected_device != "auto":
+            args.extend(["--device", selected_device])
         if self._training_mode_enabled():
             args.append("--training-mode")
         if selected_scope and selected_scope != self.RUN_SCOPE_ALL:
