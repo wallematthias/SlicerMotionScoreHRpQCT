@@ -8,6 +8,7 @@ import os
 import platform
 import re
 import shutil
+import subprocess
 import sys
 import tarfile
 import uuid
@@ -30,6 +31,7 @@ from slicer.ScriptedLoadableModule import (
 MODULE_VERSION = "0.1.0"
 DEFAULT_LICENSE_API = "https://motionscore-license-api.matthias-walle.workers.dev"
 LICENSE_HTTP_USER_AGENT = "MotionScoreSlicer/0.1 (+3D-Slicer; Python urllib)"
+CORE_PYPI_PACKAGE = "motionscorehrpqct"
 
 
 class MotionScoreHRpQCT(ScriptedLoadableModule):
@@ -219,7 +221,7 @@ class MotionScoreHRpQCTWidget(ScriptedLoadableModuleWidget):
 
         self.licenseFlowHelpLabel = qt.QLabel(
             "Fill Name/Institution/Email, click One-Click Setup. "
-            "It requests key, activates, and downloads models automatically."
+            "It installs/updates core package, requests key, activates, and downloads models automatically."
         )
         self.licenseFlowHelpLabel.setWordWrap(True)
         licenseLayout.addWidget(self.licenseFlowHelpLabel)
@@ -601,13 +603,72 @@ class MotionScoreHRpQCTWidget(ScriptedLoadableModuleWidget):
             return False
         return any(models_dir.glob("DNN_*.pt")) or any(models_dir.glob("DNN_*.h5"))
 
+    def _core_package_ready(self):
+        try:
+            import motionscore  # noqa: F401
+
+            return True
+        except Exception:
+            return False
+
     def _license_ready(self):
         return bool(self._license_token() and self._license_decrypt_key())
+
+    def _python_executable_for_setup(self):
+        return (
+            shutil.which("PythonSlicer")
+            or (sys.executable if Path(sys.executable).exists() else None)
+            or shutil.which("python3")
+            or shutil.which("python")
+        )
+
+    def _pip_install(self, *packages, upgrade=False):
+        python_exe = self._python_executable_for_setup()
+        if not python_exe:
+            raise RuntimeError("Could not find Python executable for pip install.")
+        cmd = [python_exe, "-m", "pip", "install"]
+        if upgrade:
+            cmd.append("--upgrade")
+        cmd.extend(str(p) for p in packages if str(p).strip())
+        if len(cmd) <= 4:
+            return
+        self._log(f"[setup] running: {' '.join(cmd)}\n")
+        completed = subprocess.run(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            check=False,
+        )
+        if completed.stdout:
+            self._log(completed.stdout)
+        if int(completed.returncode) != 0:
+            raise RuntimeError(f"pip install failed (exit {completed.returncode}).")
+
+    def _ensure_core_package(self):
+        if self._core_package_ready():
+            self._log(f"[setup] core package already installed: {CORE_PYPI_PACKAGE}\n")
+            return True
+        try:
+            self._set_license_status("Installing MotionScore core package from PyPI...")
+            self._pip_install(CORE_PYPI_PACKAGE)
+            if not self._core_package_ready():
+                raise RuntimeError("Installed package but 'motionscore' import still failed.")
+            self._log(f"[setup] core package install ok: {CORE_PYPI_PACKAGE}\n")
+            return True
+        except Exception as exc:
+            self._set_license_status(f"Core package install failed: {exc}")
+            slicer.util.errorDisplay(
+                "Could not install MotionScore core package from PyPI.\n\n"
+                f"Package: {CORE_PYPI_PACKAGE}\n"
+                f"Error: {exc}"
+            )
+            return False
 
     def _update_setup_status(self):
         if not hasattr(self, "setupStatusLabel"):
             return
-        install_txt = "ready" if self._has_local_models() else "missing"
+        install_txt = "ready" if (self._core_package_ready() and self._has_local_models()) else "setup"
         license_txt = "active" if self._license_ready() else "activate"
         self.setupStatusLabel.setText(f"Install: {install_txt} | License: {license_txt}")
 
@@ -686,14 +747,18 @@ class MotionScoreHRpQCTWidget(ScriptedLoadableModuleWidget):
     def onQuickSetup(self):
         """
         Friendly setup flow:
-        1) Request key (if missing)
-        2) Activate (if token missing)
-        3) Download models (if not available)
+        1) Install core package from PyPI (if missing)
+        2) Request key (if missing)
+        3) Activate (if token missing)
+        4) Download models (if not available)
         """
         self._persist_license_settings()
-        if self._license_ready() and self._has_local_models():
-            self._set_license_status("License already active. Models already installed.")
-            self._log("[license] setup skipped: already ready\n")
+        if self._core_package_ready() and self._license_ready() and self._has_local_models():
+            self._set_license_status("Setup already complete (package, license, models).")
+            self._log("[setup] skipped: already ready\n")
+            return
+
+        if not self._ensure_core_package():
             return
 
         if not self.licenseKeyEdit.text.strip():
@@ -709,13 +774,17 @@ class MotionScoreHRpQCTWidget(ScriptedLoadableModuleWidget):
                 return
 
         self._set_license_status("One-click setup complete.")
-        self._log("[license] setup complete: local models available\n")
+        self._log("[setup] complete: package, license, and local models ready\n")
 
     def onRunPredict(self):
         dataset = self.datasetPathEdit.currentPath.strip()
         if not dataset:
             slicer.util.errorDisplay("Please choose Dataset Root")
             return
+        if not self._core_package_ready():
+            self._log(f"[setup] core package missing; installing from PyPI ({CORE_PYPI_PACKAGE}).\n")
+            if not self._ensure_core_package():
+                return
         models_dir = self._models_dir()
         if models_dir is None or not models_dir.exists():
             slicer.util.errorDisplay("Could not resolve local models folder.")

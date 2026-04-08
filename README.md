@@ -25,11 +25,12 @@ This scripted module provides the full extension workflow:
 ## Typical Tutorial Workflow
 
 1. Set `Dataset Root`.
-2. Click `Run Predict` (torch backend).
-3. In `Review`, enter reviewer ID once.
-4. For each scan, click quick grade (`Grade 1..5`) to save and advance.
-5. Use `Back` to revisit and overwrite accidental grading.
-6. Click `Export Final Grades` when complete.
+2. Click `One-Click Setup` once (installs `motionscorehrpqct` from PyPI, activates license, downloads models).
+3. Click `Run Predict` (torch backend).
+4. In `Review`, enter reviewer ID once.
+5. For each scan, click quick grade (`Grade 1..5`) to save and advance.
+6. Use `Back` to revisit and overwrite accidental grading.
+7. Click `Export Final Grades` when complete.
 
 Output path:
 - `<dataset_root>/MotionScore`
