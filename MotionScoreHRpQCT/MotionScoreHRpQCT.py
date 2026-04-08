@@ -884,8 +884,6 @@ class MotionScoreHRpQCTWidget(ScriptedLoadableModuleWidget):
             dataset,
             "--confidence-threshold",
             str(int(self.confidenceSpin.value)),
-            "--backend",
-            "torch",
             "--model-dir",
             str(models_dir),
             "--output-root",
