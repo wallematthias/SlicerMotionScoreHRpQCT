@@ -33,6 +33,8 @@ DEFAULT_LICENSE_API = "https://motionscore-license-api.matthias-walle.workers.de
 LICENSE_HTTP_USER_AGENT = "MotionScoreSlicer/0.1 (+3D-Slicer; Python urllib)"
 CORE_PYPI_PACKAGE = "motionscorehrpqct"
 CORE_PIP_CONSTRAINTS = ("numpy<2.0",)
+PROFILE_PLOT_LEFT_FRACTION = 0.11
+PROFILE_PLOT_RIGHT_FRACTION = 0.89
 
 
 class MotionScoreHRpQCT(ScriptedLoadableModule):
@@ -150,6 +152,18 @@ class MotionScoreHRpQCTLogic(ScriptedLoadableModuleLogic):
         return True
 
 
+class _ProfileWheelEventFilter(qt.QObject):
+    def __init__(self, owner_widget):
+        super().__init__()
+        self._owner_widget = owner_widget
+
+    def eventFilter(self, obj, event):
+        owner = self._owner_widget
+        if owner is None:
+            return False
+        return bool(owner._handle_profile_wheel_event(obj, event))
+
+
 class MotionScoreHRpQCTWidget(ScriptedLoadableModuleWidget):
     RUN_SCOPE_ALL = "All scans"
     REVIEW_SCOPE_PENDING = "Pending only"
@@ -176,6 +190,7 @@ class MotionScoreHRpQCTWidget(ScriptedLoadableModuleWidget):
         self._grading_shortcuts = []
         self._selected_manual_grade = None
         self._grade_history = []
+        self._profile_wheel_filter = _ProfileWheelEventFilter(self)
 
     def setup(self):
         super().setup()
@@ -275,6 +290,21 @@ class MotionScoreHRpQCTWidget(ScriptedLoadableModuleWidget):
 
         self.trainingModeCheck = qt.QCheckBox("Blind operator until manual grade is submitted")
         self.trainingModeCheck.setChecked(False)
+        self.sliceStepSpin = qt.QSpinBox()
+        self.sliceStepSpin.minimum = 1
+        self.sliceStepSpin.maximum = 512
+        saved_slice_step_raw = self._settings().value("MotionScore/SliceStep", 1)
+        try:
+            saved_slice_step = int(saved_slice_step_raw or 1)
+        except Exception:
+            saved_slice_step = 1
+        if saved_slice_step < 1:
+            saved_slice_step = 1
+        self.sliceStepSpin.value = saved_slice_step
+        self.sliceStepSpin.setToolTip(
+            "Fast mode: process every n-th slice during prediction. "
+            "1 means full scan (default)."
+        )
 
         self.runScopeCombo = qt.QComboBox()
         self.runScopeCombo.addItem(self.RUN_SCOPE_ALL)
@@ -326,9 +356,10 @@ class MotionScoreHRpQCTWidget(ScriptedLoadableModuleWidget):
         reviewLayout.addRow("Training Reveal", self.trainingRevealLabel)
 
         self.profileLabel = qt.QLabel("Slice profile plot: -")
-        self.profileLabel.setMinimumHeight(140)
-        self.profileLabel.setMinimumWidth(300)
-        self.profileLabel.setMaximumWidth(800)
+        self.profileLabel.setMinimumHeight(120)
+        self.profileLabel.setMinimumWidth(180)
+        self.profileLabel.setMaximumWidth(448)
+        self.profileLabel.setMaximumHeight(240)
         self.profileLabel.setAlignment(qt.Qt.AlignCenter)
         self.profileLabel.setStyleSheet("QLabel { background: #ffffff; color: #333333; border: 1px solid #cfcfcf; }")
         self.sliceProfileBox = ctk.ctkCollapsibleButton()
@@ -408,6 +439,7 @@ class MotionScoreHRpQCTWidget(ScriptedLoadableModuleWidget):
         additionalForm = qt.QFormLayout()
         additionalForm.addRow("Confidence Threshold", self.confidenceSpin)
         additionalForm.addRow("Training Mode", self.trainingModeCheck)
+        additionalForm.addRow("Fast: Every N-th Slice", self.sliceStepSpin)
         additionalForm.addRow("Torch Device", self.deviceCombo)
         additionalForm.addRow("Run Scope", self.runScopeCombo)
         additionalForm.addRow("Auto Load", self.autoLoadCheck)
@@ -454,12 +486,27 @@ class MotionScoreHRpQCTWidget(ScriptedLoadableModuleWidget):
         self.licenseEmailEdit.editingFinished.connect(self._persist_license_settings)
         self.licenseKeyEdit.editingFinished.connect(self._persist_license_settings)
         self.deviceCombo.currentTextChanged.connect(self._persist_runtime_settings)
+        self.sliceStepSpin.valueChanged.connect(self._persist_runtime_settings)
 
         self._install_grading_shortcuts()
 
         self.layout.addStretch(1)
         self._update_setup_status()
         qt.QTimer.singleShot(0, self._install_slice_observer)
+        qt.QTimer.singleShot(0, self._install_profile_wheel_filter)
+
+    def _install_profile_wheel_filter(self):
+        try:
+            app = qt.QApplication.instance()
+            if app is None:
+                return
+            try:
+                app.removeEventFilter(self._profile_wheel_filter)
+            except Exception:
+                pass
+            app.installEventFilter(self._profile_wheel_filter)
+        except Exception as exc:
+            self._log(f"[profile] could not install wheel filter: {exc}\n")
 
     def _default_models_path(self):
         app_data = str(qt.QStandardPaths.writableLocation(qt.QStandardPaths.AppDataLocation) or "").strip()
@@ -488,6 +535,7 @@ class MotionScoreHRpQCTWidget(ScriptedLoadableModuleWidget):
 
     def _persist_runtime_settings(self):
         self._settings().setValue("MotionScore/TorchDevice", self._combo_text(self.deviceCombo))
+        self._settings().setValue("MotionScore/SliceStep", int(self.sliceStepSpin.value))
 
     def _install_grading_shortcuts(self):
         parent_widget = self.parent if isinstance(self.parent, qt.QWidget) else slicer.util.mainWindow()
@@ -899,6 +947,8 @@ class MotionScoreHRpQCTWidget(ScriptedLoadableModuleWidget):
             str(models_dir),
             "--output-root",
             dataset,
+            "--slice-step",
+            str(int(self.sliceStepSpin.value)),
         ]
         selected_device = (self._combo_text(self.deviceCombo) or "auto").lower()
         if selected_device != "auto":
@@ -2005,6 +2055,112 @@ class MotionScoreHRpQCTWidget(ScriptedLoadableModuleWidget):
         slice_idx = max(0, min(n_slices - 1, slice_idx))
         return slice_idx, n_slices
 
+    def _slice_step_mm(self):
+        node = self._loaded_volume_node
+        if node is None:
+            return 1.0
+        try:
+            spacing = node.GetSpacing()
+            if spacing is not None and len(spacing) >= 3:
+                step = abs(float(spacing[2]))
+                if step > 0.0:
+                    return step
+        except Exception:
+            pass
+        return 1.0
+
+    def _scroll_loaded_slice_by(self, steps):
+        if not self._loaded_scan_id or self._loaded_volume_node is None:
+            return False
+        try:
+            steps_i = int(steps)
+        except Exception:
+            return False
+        if steps_i == 0:
+            return False
+        self._install_slice_observer()
+        if self._slice_observer_node is None:
+            return False
+        try:
+            current_offset = float(self._slice_observer_node.GetSliceOffset())
+        except Exception:
+            return False
+
+        step_mm = self._slice_step_mm()
+        target_offset = current_offset + float(steps_i) * step_mm
+        try:
+            self._slice_observer_node.SetSliceOffset(target_offset)
+        except Exception:
+            return False
+
+        self._render_profile_plot(self._loaded_scan_id)
+        return True
+
+    def _wheel_steps_from_event(self, event):
+        delta_y = 0
+        try:
+            angle = event.angleDelta()
+            y_attr = angle.y
+            delta_y = int(y_attr() if callable(y_attr) else y_attr)
+        except Exception:
+            delta_y = 0
+        if delta_y == 0:
+            try:
+                pixel = event.pixelDelta()
+                y_attr = pixel.y
+                delta_y = int(y_attr() if callable(y_attr) else y_attr)
+            except Exception:
+                delta_y = 0
+        if delta_y == 0:
+            try:
+                delta_y = int(event.delta())
+            except Exception:
+                delta_y = 0
+        if delta_y == 0:
+            return 0
+        steps = int(delta_y / 120)
+        if steps == 0:
+            return 1 if delta_y > 0 else -1
+        return steps
+
+    def _is_profile_widget_or_child(self, widget):
+        current = widget
+        while current is not None:
+            if current is self.profileLabel:
+                return True
+            parent_attr = getattr(current, "parentWidget", None)
+            if parent_attr is None:
+                break
+            try:
+                current = parent_attr() if callable(parent_attr) else None
+            except Exception:
+                break
+        return False
+
+    def _cursor_over_profile_area(self):
+        try:
+            app = qt.QApplication.instance()
+            if app is None:
+                return False
+            hover = app.widgetAt(qt.QCursor.pos())
+            return self._is_profile_widget_or_child(hover)
+        except Exception:
+            return False
+
+    def _handle_profile_wheel_event(self, obj, event):
+        try:
+            if event is not None and event.type() == qt.QEvent.Wheel and self._cursor_over_profile_area():
+                steps = self._wheel_steps_from_event(event)
+                if steps != 0 and self._scroll_loaded_slice_by(steps):
+                    try:
+                        event.accept()
+                    except Exception:
+                        pass
+                    return True
+        except Exception as exc:
+            self._log(f"[profile] wheel event handling failed: {exc}\n")
+        return False
+
     def _grade_for_scan(self, scan_id):
         if self._selected_manual_grade in {1, 2, 3, 4, 5}:
             return int(self._selected_manual_grade)
@@ -2027,7 +2183,7 @@ class MotionScoreHRpQCTWidget(ScriptedLoadableModuleWidget):
 
         width_attr = self.profileLabel.width
         label_width = int(width_attr() if callable(width_attr) else width_attr)
-        width = max(300, min(800, label_width - 8))
+        width = max(180, min(434, label_width - 8))
         scaled = self._profile_source_pixmap.scaledToWidth(width, qt.Qt.SmoothTransformation)
         if scaled.isNull():
             self._clear_profile_plot()
@@ -2038,12 +2194,18 @@ class MotionScoreHRpQCTWidget(ScriptedLoadableModuleWidget):
             slice_idx, n_slices = self._current_slice_cursor()
             if slice_idx is not None and n_slices is not None and n_slices > 1:
                 frac = float(slice_idx) / float(n_slices - 1)
-                y = int(round(frac * float(max(0, out_pix.height() - 1))))
+                x_min = int(round(float(max(0, out_pix.width() - 1)) * PROFILE_PLOT_LEFT_FRACTION))
+                x_max = int(round(float(max(0, out_pix.width() - 1)) * PROFILE_PLOT_RIGHT_FRACTION))
+                if x_max <= x_min:
+                    x_min = 0
+                    x_max = max(0, out_pix.width() - 1)
+                x = int(round(float(x_min) + frac * float(x_max - x_min)))
+                x = max(0, min(max(0, out_pix.width() - 1), x))
                 painter = qt.QPainter(out_pix)
                 pen = qt.QPen(self._grade_plot_color(self._grade_for_scan(scan_id)))
                 pen.setWidth(2)
                 painter.setPen(pen)
-                painter.drawLine(0, y, max(0, out_pix.width() - 1), y)
+                painter.drawLine(x, 0, x, max(0, out_pix.height() - 1))
                 painter.end()
 
         self.profileLabel.setPixmap(out_pix)
