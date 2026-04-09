@@ -42,10 +42,13 @@ This scripted module provides the full extension workflow:
    - `Prepare Retrain Manifest` (manual labels prioritized),
    - `Train Classifier` (updates final classifier layers only),
    - `Train Full Model` (updates classifier + backbone),
+   - set `Random Seed` for deterministic retrain sampling/splits,
    - view a live train/validation loss + learning-rate plot during training,
    - automatically register the new model profile for future runs.
 
 `Train Classifier` and `Train Full Model` automatically regenerate the retrain manifest before training.
+The retrain manifest uses strict fold-aware training (`fold_id` required), and CV folds are auto-matched to
+the selected base model's checkpoint count.
 
 Output path:
 - `<dataset_root>/MotionScore`

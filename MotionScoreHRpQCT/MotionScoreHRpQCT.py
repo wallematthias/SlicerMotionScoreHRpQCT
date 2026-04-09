@@ -29,7 +29,7 @@ from slicer.ScriptedLoadableModule import (
 )
 
 
-MODULE_VERSION = "0.1.2"
+MODULE_VERSION = "0.1.3"
 DEFAULT_LICENSE_API = "https://motionscore-license-api.matthias-walle.workers.dev"
 LICENSE_HTTP_USER_AGENT = "MotionScoreSlicer/0.1 (+3D-Slicer; Python urllib)"
 CORE_PYPI_PACKAGE = "motionscorehrpqct"
@@ -522,6 +522,12 @@ class MotionScoreHRpQCTWidget(ScriptedLoadableModuleWidget):
         self.retrainPatienceSpin.value = int(self._settings().value("MotionScore/RetrainPatience", 10) or 10)
         retrainForm.addRow("Early Stopping Patience", self.retrainPatienceSpin)
 
+        self.retrainSeedSpin = qt.QSpinBox()
+        self.retrainSeedSpin.minimum = 0
+        self.retrainSeedSpin.maximum = 2_147_483_647
+        self.retrainSeedSpin.value = int(self._settings().value("MotionScore/RetrainSeed", 13) or 13)
+        retrainForm.addRow("Random Seed", self.retrainSeedSpin)
+
         self.deviceCombo.setToolTip("Torch device used for prediction and retraining.")
         retrainForm.addRow("Torch Device", self.deviceCombo)
 
@@ -573,7 +579,8 @@ class MotionScoreHRpQCTWidget(ScriptedLoadableModuleWidget):
 
         self.trainingPlotLabel = qt.QLabel("Training plot: -")
         self.trainingPlotLabel.setAlignment(qt.Qt.AlignCenter)
-        self.trainingPlotLabel.setMinimumSize(TRAINING_PLOT_WIDTH, TRAINING_PLOT_HEIGHT)
+        self.trainingPlotLabel.setMinimumHeight(TRAINING_PLOT_HEIGHT)
+        self.trainingPlotLabel.setMinimumWidth(0)
         self.trainingPlotLabel.setMaximumHeight(TRAINING_PLOT_HEIGHT + 20)
         self.trainingPlotLabel.setStyleSheet("QLabel { background: #ffffff; color: #333333; border: 1px solid #cfcfcf; }")
         retrainLayout.addWidget(self.trainingPlotLabel)
@@ -631,6 +638,7 @@ class MotionScoreHRpQCTWidget(ScriptedLoadableModuleWidget):
         self.retrainSliceCountSpin.valueChanged.connect(self._persist_runtime_settings)
         self.retrainIncludeAutoCheck.toggled.connect(self._persist_runtime_settings)
         self.retrainPatienceSpin.valueChanged.connect(self._persist_runtime_settings)
+        self.retrainSeedSpin.valueChanged.connect(self._persist_runtime_settings)
         self.retrainAugHFlipCheck.toggled.connect(self._persist_runtime_settings)
         self.retrainAugVFlipCheck.toggled.connect(self._persist_runtime_settings)
         self.retrainAugRotateCheck.toggled.connect(self._persist_runtime_settings)
@@ -696,6 +704,7 @@ class MotionScoreHRpQCTWidget(ScriptedLoadableModuleWidget):
         auto_attr = self.retrainIncludeAutoCheck.checked
         self._settings().setValue("MotionScore/RetrainIncludeAuto", 1 if bool(auto_attr() if callable(auto_attr) else auto_attr) else 0)
         self._settings().setValue("MotionScore/RetrainPatience", int(self.retrainPatienceSpin.value))
+        self._settings().setValue("MotionScore/RetrainSeed", int(self.retrainSeedSpin.value))
         aug_h_attr = self.retrainAugHFlipCheck.checked
         aug_v_attr = self.retrainAugVFlipCheck.checked
         aug_rotate_attr = self.retrainAugRotateCheck.checked
@@ -1053,6 +1062,23 @@ class MotionScoreHRpQCTWidget(ScriptedLoadableModuleWidget):
             return None
         return models_root / self._normalized_retrain_model_id()
 
+    def _retrain_cv_folds(self):
+        models_root = self._models_dir()
+        if models_root is None:
+            return 10
+        model_id = self._selected_retrain_base_model_id()
+        checkpoint_count = 0
+        try:
+            from motionscore.model_registry import resolve_model_dir
+
+            model_dir, _profile = resolve_model_dir(model_root=models_root, model_id=model_id)
+            checkpoint_count = len(list(Path(model_dir).glob("DNN_*.pt")))
+        except Exception:
+            fallback_dir = (Path(models_root) / str(model_id).strip()).resolve()
+            if fallback_dir.exists():
+                checkpoint_count = len(list(fallback_dir.glob("DNN_*.pt")))
+        return int(max(2, checkpoint_count if checkpoint_count > 0 else 10))
+
     def _retrain_continue_lr(self, output_model_dir):
         metrics_path = Path(output_model_dir) / "training_metrics.json"
         default_lr = 1e-4
@@ -1093,7 +1119,10 @@ class MotionScoreHRpQCTWidget(ScriptedLoadableModuleWidget):
         pix = qt.QPixmap(str(plot_path))
         if pix.isNull():
             return
-        scaled = pix.scaled(TRAINING_PLOT_WIDTH, TRAINING_PLOT_HEIGHT, qt.Qt.KeepAspectRatio, qt.Qt.SmoothTransformation)
+        width_attr = self.trainingPlotLabel.width
+        current_width = int(width_attr() if callable(width_attr) else width_attr)
+        target_width = int(max(320, min(TRAINING_PLOT_WIDTH, current_width)))
+        scaled = pix.scaled(target_width, TRAINING_PLOT_HEIGHT, qt.Qt.KeepAspectRatio, qt.Qt.SmoothTransformation)
         self.trainingPlotLabel.setPixmap(scaled)
         self.trainingPlotLabel.setText("")
 
@@ -1287,6 +1316,7 @@ class MotionScoreHRpQCTWidget(ScriptedLoadableModuleWidget):
         self.retrainIncludeAutoCheck.enabled = enabled
         self.retrainSliceCountSpin.enabled = enabled
         self.retrainPatienceSpin.enabled = enabled
+        self.retrainSeedSpin.enabled = enabled
         self.retrainAugHFlipCheck.enabled = enabled
         self.retrainAugVFlipCheck.enabled = enabled
         self.retrainAugRotateCheck.enabled = enabled
@@ -2130,6 +2160,10 @@ class MotionScoreHRpQCTWidget(ScriptedLoadableModuleWidget):
             str(float(int(self.confidenceSpin.value)) / 100.0),
             "--slice-count",
             str(int(self.retrainSliceCountSpin.value)),
+            "--seed",
+            str(int(self.retrainSeedSpin.value)),
+            "--cv-folds",
+            str(int(self._retrain_cv_folds())),
         ]
         auto_attr = self.retrainIncludeAutoCheck.checked
         if bool(auto_attr() if callable(auto_attr) else auto_attr):
@@ -2162,6 +2196,8 @@ class MotionScoreHRpQCTWidget(ScriptedLoadableModuleWidget):
             str(0 if classifier_only else int(self.retrainEpochsFineSpin.value)),
             "--early-stopping-patience",
             str(int(self.retrainPatienceSpin.value)),
+            "--seed",
+            str(int(self.retrainSeedSpin.value)),
         ]
         if continue_training and any(output_model_dir.glob("DNN_*.pt")):
             args.extend(["--init-model-dir", str(output_model_dir)])
