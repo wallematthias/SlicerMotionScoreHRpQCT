@@ -20,19 +20,32 @@ This scripted module provides the full extension workflow:
 - run `motionscore predict` from dataset root,
 - review scans with quick grades and reviewer attribution,
 - monitor agreement metrics,
-- export consolidated final grade tables.
+- export consolidated final grade tables,
+- select registered model profiles (`base`, `peds`, `knee`, etc.),
+- prepare retraining manifests and run transfer learning from inside Slicer.
 
 ## Typical Tutorial Workflow
 
 1. Set `Dataset Root`.
 2. Click `One-Click Setup` once (installs `motionscorehrpqct` from PyPI, activates license, downloads models).
    - Optional: use `Force Reinstall Package` in `License` if you need to refresh a broken/outdated local install.
-3. Click `Run Predict` (torch backend).
-   - Optional: choose `Torch Device` in `Additional Options` (`auto`, `mps`, `cpu`, `cuda`).
-4. In `Review`, enter reviewer ID once.
-5. For each scan, click quick grade (`Grade 1..5`) to save and advance.
-6. Use `Back` to revisit and overwrite accidental grading.
-7. Click `Export Final Grades` when complete.
+3. Choose `Model Profile` (shown directly in the `Run` section).
+4. Click either:
+   - `Predict` (AI-assisted),
+   - or `Grade Manually` (no CNN inference).
+5. Optional: choose `Torch Device` in `Additional Options` (`auto`, `mps`, `cpu`, `cuda`).
+6. In `Review`, enter reviewer ID once.
+7. For each scan, click quick grade (`Grade 1..5`) to save and advance.
+8. Use `Back` to revisit and overwrite accidental grading.
+9. Click `Export Final Grades` when complete.
+10. Optional: use `Retrain` to:
+   - `Prepare Retrain Manifest` (manual labels prioritized),
+   - `Train Classifier` (updates final classifier layers only),
+   - `Train Full Model` (updates classifier + backbone),
+   - view a live train/validation loss + learning-rate plot during training,
+   - automatically register the new model profile for future runs.
+
+`Train Classifier` and `Train Full Model` automatically regenerate the retrain manifest before training.
 
 Output path:
 - `<dataset_root>/MotionScore`

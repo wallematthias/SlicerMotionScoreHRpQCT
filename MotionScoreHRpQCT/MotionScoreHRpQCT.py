@@ -35,6 +35,8 @@ CORE_PYPI_PACKAGE = "motionscorehrpqct"
 CORE_PIP_CONSTRAINTS = ("numpy<2.0",)
 PROFILE_PLOT_LEFT_FRACTION = 0.11
 PROFILE_PLOT_RIGHT_FRACTION = 0.89
+TRAINING_PLOT_WIDTH = 760
+TRAINING_PLOT_HEIGHT = 280
 
 
 class MotionScoreHRpQCT(ScriptedLoadableModule):
@@ -192,7 +194,12 @@ class MotionScoreHRpQCTWidget(ScriptedLoadableModuleWidget):
         self._grading_shortcuts = []
         self._selected_manual_grade = None
         self._grade_history = []
+        self._model_profiles = []
+        self._training_output_model_dir = None
         self._profile_wheel_filter = _ProfileWheelEventFilter(self)
+        self._model_index_rows = {}
+        self._model_review_rows = {}
+        self._model_audit_rows = {}
 
     def setup(self):
         super().setup()
@@ -267,11 +274,29 @@ class MotionScoreHRpQCTWidget(ScriptedLoadableModuleWidget):
         self.datasetPathEdit.setToolTip("Select dataset folder (browse starts at home when empty).")
         runForm.addRow("Dataset Root", self.datasetPathEdit)
 
+        self.modelProfileCombo = qt.QComboBox()
+        runForm.addRow("Model Profile", self.modelProfileCombo)
+
+        self.sliceStepSpin = qt.QSpinBox()
+        self.sliceStepSpin.minimum = 1
+        self.sliceStepSpin.maximum = 512
+        saved_slice_step_raw = self._settings().value("MotionScore/SliceStep", 1)
+        try:
+            saved_slice_step = int(saved_slice_step_raw or 1)
+        except Exception:
+            saved_slice_step = 1
+        self.sliceStepSpin.value = max(1, saved_slice_step)
+        self.sliceStepSpin.setToolTip("Fast mode: process every n-th slice during prediction. 1 means full scan.")
+
         runButtonsRow = qt.QHBoxLayout()
-        self.runButton = qt.QPushButton("Run Predict")
+        self.loadDatasetButton = qt.QPushButton("Load Dataset")
+        self.runButton = qt.QPushButton("Predict")
+        self.manualRunButton = qt.QPushButton("Grade Manually")
         self.interruptButton = qt.QPushButton("Interrupt")
         self.interruptButton.enabled = False
+        runButtonsRow.addWidget(self.loadDatasetButton)
         runButtonsRow.addWidget(self.runButton)
+        runButtonsRow.addWidget(self.manualRunButton)
         runButtonsRow.addWidget(self.interruptButton)
         runLayout.addLayout(runButtonsRow)
 
@@ -292,30 +317,13 @@ class MotionScoreHRpQCTWidget(ScriptedLoadableModuleWidget):
 
         self.trainingModeCheck = qt.QCheckBox("Blind operator until manual grade is submitted")
         self.trainingModeCheck.setChecked(False)
-        self.sliceStepSpin = qt.QSpinBox()
-        self.sliceStepSpin.minimum = 1
-        self.sliceStepSpin.maximum = 512
-        saved_slice_step_raw = self._settings().value("MotionScore/SliceStep", 1)
-        try:
-            saved_slice_step = int(saved_slice_step_raw or 1)
-        except Exception:
-            saved_slice_step = 1
-        if saved_slice_step < 1:
-            saved_slice_step = 1
-        self.sliceStepSpin.value = saved_slice_step
-        self.sliceStepSpin.setToolTip(
-            "Fast mode: process every n-th slice during prediction. "
-            "1 means full scan (default)."
-        )
+
+        self.runModeCombo = qt.QComboBox()
+        self.runModeCombo.addItems([self.RUN_MODE_AI, self.RUN_MODE_MANUAL])
+        self.runModeCombo.setCurrentText(self.RUN_MODE_AI)
 
         self.runScopeCombo = qt.QComboBox()
         self.runScopeCombo.addItem(self.RUN_SCOPE_ALL)
-        self.runModeCombo = qt.QComboBox()
-        self.runModeCombo.addItems([self.RUN_MODE_AI, self.RUN_MODE_MANUAL])
-        saved_run_mode = str(self._settings().value("MotionScore/RunMode", self.RUN_MODE_AI) or self.RUN_MODE_AI)
-        if saved_run_mode not in {self.RUN_MODE_AI, self.RUN_MODE_MANUAL}:
-            saved_run_mode = self.RUN_MODE_AI
-        self.runModeCombo.setCurrentText(saved_run_mode)
         self.deviceCombo = qt.QComboBox()
         self.deviceCombo.addItems(["auto", "mps", "cpu", "cuda"])
         saved_device = str(self._settings().value("MotionScore/TorchDevice", "auto") or "auto").strip().lower()
@@ -362,6 +370,9 @@ class MotionScoreHRpQCTWidget(ScriptedLoadableModuleWidget):
         self.trainingRevealLabel = qt.QLabel("Last training reveal: -")
         self.trainingRevealLabel.setWordWrap(True)
         reviewLayout.addRow("Training Reveal", self.trainingRevealLabel)
+
+        self.profileModelCombo = qt.QComboBox()
+        reviewLayout.addRow("Profile Model", self.profileModelCombo)
 
         self.profileLabel = qt.QLabel("Slice profile plot: -")
         self.profileLabel.setMinimumHeight(120)
@@ -423,7 +434,9 @@ class MotionScoreHRpQCTWidget(ScriptedLoadableModuleWidget):
         self.backButton.enabled = False
         self.applyButton = qt.QPushButton("Save Grade + Next")
         self.applyButton.setVisible(False)
+        self.importButton = qt.QPushButton("Import Final Grades")
         reviewActionRow.addWidget(self.backButton)
+        reviewActionRow.addWidget(self.importButton)
         reviewActionRow.addWidget(self.exportButton)
         reviewLayout.addRow(reviewActionRow)
 
@@ -467,22 +480,120 @@ class MotionScoreHRpQCTWidget(ScriptedLoadableModuleWidget):
         clearRow.addWidget(self.clearButton)
         additionalForm.addRow("Clear Reviewer", clearRow)
 
+        self.layout.addWidget(self.additionalOptionsBox)
+
+        self.retrainBox = ctk.ctkCollapsibleButton()
+        self.retrainBox.text = "Retrain"
+        self.retrainBox.collapsed = True
+        retrainLayout = qt.QVBoxLayout(self.retrainBox)
+        retrainForm = qt.QFormLayout()
+        retrainLayout.addLayout(retrainForm)
+
+        self.retrainModelIdEdit = qt.QLineEdit()
+        self.retrainModelIdEdit.setText(str(self._settings().value("MotionScore/RetrainModelId", "") or ""))
+        self.retrainModelIdEdit.setPlaceholderText("custom-v1")
+        retrainForm.addRow("New Model ID", self.retrainModelIdEdit)
+
+        self.retrainDisplayNameEdit = qt.QLineEdit()
+        self.retrainDisplayNameEdit.setText(str(self._settings().value("MotionScore/RetrainDisplayName", "") or ""))
+        self.retrainDisplayNameEdit.setPlaceholderText("Custom retrain")
+        retrainForm.addRow("Display Name", self.retrainDisplayNameEdit)
+
+        self.retrainSliceCountSpin = qt.QSpinBox()
+        self.retrainSliceCountSpin.minimum = 0
+        self.retrainSliceCountSpin.maximum = 128
+        self.retrainSliceCountSpin.value = int(self._settings().value("MotionScore/RetrainSliceCount", 8) or 8)
+        retrainForm.addRow("Slices Per Scan", self.retrainSliceCountSpin)
+
+        self.retrainPatienceSpin = qt.QSpinBox()
+        self.retrainPatienceSpin.minimum = 0
+        self.retrainPatienceSpin.maximum = 100
+        self.retrainPatienceSpin.value = int(self._settings().value("MotionScore/RetrainPatience", 10) or 10)
+        retrainForm.addRow("Early Stopping Patience", self.retrainPatienceSpin)
+
+        self.retrainAugHFlipCheck = qt.QCheckBox("Horizontal flip")
+        self.retrainAugHFlipCheck.setChecked(bool(int(self._settings().value("MotionScore/RetrainAugHFlip", 1) or 1)))
+        retrainForm.addRow("Augmentation", self.retrainAugHFlipCheck)
+
+        self.retrainAugVFlipCheck = qt.QCheckBox("Vertical flip")
+        self.retrainAugVFlipCheck.setChecked(bool(int(self._settings().value("MotionScore/RetrainAugVFlip", 1) or 1)))
+        retrainForm.addRow("", self.retrainAugVFlipCheck)
+
+        self.retrainAugRotateCheck = qt.QCheckBox("Rotate 90°")
+        self.retrainAugRotateCheck.setChecked(bool(int(self._settings().value("MotionScore/RetrainAugRotate", 0) or 0)))
+        retrainForm.addRow("", self.retrainAugRotateCheck)
+
+        self.retrainAugCropCheck = qt.QCheckBox("Random crop")
+        self.retrainAugCropCheck.setChecked(bool(int(self._settings().value("MotionScore/RetrainAugCrop", 0) or 0)))
+        retrainForm.addRow("", self.retrainAugCropCheck)
+
+        self.retrainEpochsHeadSpin = qt.QSpinBox()
+        self.retrainEpochsHeadSpin.minimum = 0
+        self.retrainEpochsHeadSpin.maximum = 500
+        self.retrainEpochsHeadSpin.value = int(self._settings().value("MotionScore/RetrainEpochsHead", 10) or 10)
+        retrainForm.addRow("Classifier Epochs", self.retrainEpochsHeadSpin)
+
+        self.retrainEpochsFineSpin = qt.QSpinBox()
+        self.retrainEpochsFineSpin.minimum = 0
+        self.retrainEpochsFineSpin.maximum = 1000
+        self.retrainEpochsFineSpin.value = int(self._settings().value("MotionScore/RetrainEpochsFine", 50) or 50)
+        retrainForm.addRow("Full Epochs", self.retrainEpochsFineSpin)
+
+        retrainButtonsRow = qt.QHBoxLayout()
+        self.prepareRetrainButton = qt.QPushButton("Prepare Retrain Manifest")
+        self.trainHeadButton = qt.QPushButton("Train Classifier")
+        self.trainFullButton = qt.QPushButton("Train Full Model")
+        self.continueTrainButton = qt.QPushButton("Continue Training")
+        self.trainInterruptButton = qt.QPushButton("Interrupt")
+        self.trainInterruptButton.enabled = False
+        retrainButtonsRow.addWidget(self.prepareRetrainButton)
+        retrainButtonsRow.addWidget(self.trainHeadButton)
+        retrainButtonsRow.addWidget(self.trainFullButton)
+        retrainButtonsRow.addWidget(self.continueTrainButton)
+        retrainButtonsRow.addWidget(self.trainInterruptButton)
+        retrainLayout.addLayout(retrainButtonsRow)
+
+        self.trainingMetricsLabel = qt.QLabel("Holdout: -")
+        self.trainingMetricsLabel.setWordWrap(True)
+        retrainLayout.addWidget(self.trainingMetricsLabel)
+
+        self.trainingPlotLabel = qt.QLabel("Training plot: -")
+        self.trainingPlotLabel.setAlignment(qt.Qt.AlignCenter)
+        self.trainingPlotLabel.setMinimumSize(TRAINING_PLOT_WIDTH, TRAINING_PLOT_HEIGHT)
+        self.trainingPlotLabel.setMaximumHeight(TRAINING_PLOT_HEIGHT + 20)
+        self.trainingPlotLabel.setStyleSheet("QLabel { background: #ffffff; color: #333333; border: 1px solid #cfcfcf; }")
+        retrainLayout.addWidget(self.trainingPlotLabel)
+
+        self.layout.addWidget(self.retrainBox)
+
+        self.consoleBox = ctk.ctkCollapsibleButton()
+        self.consoleBox.text = "Console"
+        self.consoleBox.collapsed = False
+        consoleLayout = qt.QVBoxLayout(self.consoleBox)
+
         self.logText = qt.QPlainTextEdit()
         self.logText.readOnly = True
         self.logText.setMaximumBlockCount(5000)
-        additionalLayout.addWidget(self.logText)
+        consoleLayout.addWidget(self.logText)
+        self.layout.addWidget(self.consoleBox)
 
-        self.layout.addWidget(self.additionalOptionsBox)
-
+        self.loadDatasetButton.clicked.connect(self.onLoadDataset)
         self.runButton.clicked.connect(self.onRunPredict)
+        self.manualRunButton.clicked.connect(self.onRunManualOnly)
         self.interruptButton.clicked.connect(self.onInterrupt)
+        self.trainInterruptButton.clicked.connect(self.onInterrupt)
         self.refreshButton.clicked.connect(self.onRefreshReview)
         self.exportButton.clicked.connect(self.onExport)
+        self.importButton.clicked.connect(self.onImportFinalGrades)
         self.quickSetupButton.clicked.connect(self.onQuickSetup)
         self.forceReinstallButton.clicked.connect(self.onForceReinstallPackage)
         self.backButton.clicked.connect(self.onBackToPreviousScan)
         self.clearButton.clicked.connect(self.onClearGrades)
         self.loadScanButton.clicked.connect(self.onLoadSelectedScan)
+        self.prepareRetrainButton.clicked.connect(self.onPrepareRetrainManifest)
+        self.trainHeadButton.clicked.connect(self.onTrainClassifierOnly)
+        self.trainFullButton.clicked.connect(self.onTrainFullModel)
+        self.continueTrainButton.clicked.connect(self.onContinueTraining)
         self.scanCombo.currentTextChanged.connect(self.onScanSelectionChanged)
         self.reviewScopeCombo.currentTextChanged.connect(self.onReviewScopeChanged)
         self.confidenceSpin.valueChanged.connect(self.onConfidenceThresholdChanged)
@@ -496,12 +607,25 @@ class MotionScoreHRpQCTWidget(ScriptedLoadableModuleWidget):
         self.licenseKeyEdit.editingFinished.connect(self._persist_license_settings)
         self.deviceCombo.currentTextChanged.connect(self._persist_runtime_settings)
         self.runModeCombo.currentTextChanged.connect(self._persist_runtime_settings)
+        self.modelProfileCombo.currentTextChanged.connect(self._persist_runtime_settings)
+        self.profileModelCombo.currentTextChanged.connect(self.onProfileModelChanged)
         self.sliceStepSpin.valueChanged.connect(self._persist_runtime_settings)
+        self.retrainModelIdEdit.editingFinished.connect(self._persist_runtime_settings)
+        self.retrainDisplayNameEdit.editingFinished.connect(self._persist_runtime_settings)
+        self.retrainSliceCountSpin.valueChanged.connect(self._persist_runtime_settings)
+        self.retrainPatienceSpin.valueChanged.connect(self._persist_runtime_settings)
+        self.retrainAugHFlipCheck.toggled.connect(self._persist_runtime_settings)
+        self.retrainAugVFlipCheck.toggled.connect(self._persist_runtime_settings)
+        self.retrainAugRotateCheck.toggled.connect(self._persist_runtime_settings)
+        self.retrainAugCropCheck.toggled.connect(self._persist_runtime_settings)
+        self.retrainEpochsHeadSpin.valueChanged.connect(self._persist_runtime_settings)
+        self.retrainEpochsFineSpin.valueChanged.connect(self._persist_runtime_settings)
 
         self._install_grading_shortcuts()
 
         self.layout.addStretch(1)
         self._update_setup_status()
+        self._refresh_model_profiles()
         qt.QTimer.singleShot(0, self._install_slice_observer)
         qt.QTimer.singleShot(0, self._install_profile_wheel_filter)
 
@@ -546,7 +670,22 @@ class MotionScoreHRpQCTWidget(ScriptedLoadableModuleWidget):
     def _persist_runtime_settings(self):
         self._settings().setValue("MotionScore/TorchDevice", self._combo_text(self.deviceCombo))
         self._settings().setValue("MotionScore/RunMode", self._combo_text(self.runModeCombo))
+        self._settings().setValue("MotionScore/ModelProfile", self._selected_model_id())
         self._settings().setValue("MotionScore/SliceStep", int(self.sliceStepSpin.value))
+        self._settings().setValue("MotionScore/RetrainModelId", self.retrainModelIdEdit.text.strip())
+        self._settings().setValue("MotionScore/RetrainDisplayName", self.retrainDisplayNameEdit.text.strip())
+        self._settings().setValue("MotionScore/RetrainSliceCount", int(self.retrainSliceCountSpin.value))
+        self._settings().setValue("MotionScore/RetrainPatience", int(self.retrainPatienceSpin.value))
+        aug_h_attr = self.retrainAugHFlipCheck.checked
+        aug_v_attr = self.retrainAugVFlipCheck.checked
+        aug_rotate_attr = self.retrainAugRotateCheck.checked
+        aug_crop_attr = self.retrainAugCropCheck.checked
+        self._settings().setValue("MotionScore/RetrainAugHFlip", 1 if bool(aug_h_attr() if callable(aug_h_attr) else aug_h_attr) else 0)
+        self._settings().setValue("MotionScore/RetrainAugVFlip", 1 if bool(aug_v_attr() if callable(aug_v_attr) else aug_v_attr) else 0)
+        self._settings().setValue("MotionScore/RetrainAugRotate", 1 if bool(aug_rotate_attr() if callable(aug_rotate_attr) else aug_rotate_attr) else 0)
+        self._settings().setValue("MotionScore/RetrainAugCrop", 1 if bool(aug_crop_attr() if callable(aug_crop_attr) else aug_crop_attr) else 0)
+        self._settings().setValue("MotionScore/RetrainEpochsHead", int(self.retrainEpochsHeadSpin.value))
+        self._settings().setValue("MotionScore/RetrainEpochsFine", int(self.retrainEpochsFineSpin.value))
 
     def _install_grading_shortcuts(self):
         parent_widget = self.parent if isinstance(self.parent, qt.QWidget) else slicer.util.mainWindow()
@@ -672,6 +811,249 @@ class MotionScoreHRpQCTWidget(ScriptedLoadableModuleWidget):
         self.logText.moveCursor(qt.QTextCursor.End)
         self.logText.insertPlainText(text)
         self.logText.moveCursor(qt.QTextCursor.End)
+
+    def _combo_data(self, combo):
+        try:
+            idx_attr = combo.currentIndex
+            idx = idx_attr() if callable(idx_attr) else idx_attr
+            return combo.itemData(idx)
+        except Exception:
+            return None
+
+    def _selected_model_id(self):
+        data = self._combo_data(self.modelProfileCombo)
+        if data:
+            return str(data).strip()
+        return "base-v1"
+
+    def _selected_profile_model_id(self):
+        data = self._combo_data(self.profileModelCombo)
+        if data:
+            return str(data).strip()
+        return ""
+
+    def _model_display_name(self, model_id):
+        model_id_txt = str(model_id or "").strip()
+        if not model_id_txt:
+            return "Unknown model"
+        for entry in self._model_profiles:
+            if str(entry.get("model_id", "")).strip() == model_id_txt:
+                return str(entry.get("display_name", "")).strip() or model_id_txt
+        return model_id_txt
+
+    def _model_display_label(self, model_id):
+        model_id_txt = str(model_id or "").strip()
+        display = self._model_display_name(model_id_txt)
+        if display == model_id_txt:
+            return display
+        return f"{display} ({model_id_txt})"
+
+    def _first_row_from_tsv(self, path):
+        if path is None or not path.exists():
+            return {}
+        try:
+            rows = read_tsv(path)
+        except Exception:
+            return {}
+        return dict(rows[0]) if rows else {}
+
+    def _dir_named(self, path, dirname):
+        current = Path(path).resolve()
+        for candidate in [current] + list(current.parents):
+            if candidate.name == dirname:
+                return candidate
+        return None
+
+    def _discover_model_entries_for_scan(self, derivatives, index_row):
+        scan_id = str(index_row.get("scan_id", "")).strip()
+        active_model_id = str(index_row.get("model_id", "")).strip()
+        out = {}
+
+        def _add_entry(model_id, pred_path=None, review_path=None, audit_path=None, index_template=None):
+            model_id_txt = str(model_id or "").strip() or "base-v1"
+            pred_row = self._first_row_from_tsv(pred_path)
+            if pred_row:
+                model_id_txt = str(pred_row.get("model_id", "")).strip() or model_id_txt
+            merged_index = dict(index_template or index_row)
+            merged_index["model_id"] = model_id_txt
+            if pred_path is not None and pred_path.exists():
+                merged_index["predictions_tsv"] = os.path.relpath(str(pred_path.resolve()), str(derivatives.resolve()))
+            if review_path is not None and review_path.exists():
+                merged_index["review_tsv"] = os.path.relpath(str(review_path.resolve()), str(derivatives.resolve()))
+            if audit_path is not None and audit_path.exists():
+                merged_index["review_audit"] = os.path.relpath(str(audit_path.resolve()), str(derivatives.resolve()))
+            if pred_row:
+                for key in (
+                    "preview_png_path",
+                    "slice_profile_png_path",
+                    "automatic_grade",
+                    "automatic_confidence",
+                    "raw_image_path",
+                    "model_version",
+                    "predicted_at",
+                ):
+                    if str(pred_row.get(key, "")).strip():
+                        merged_index[key] = pred_row.get(key, "")
+            review_row = self._first_row_from_tsv(review_path)
+            audits = []
+            if audit_path is not None and audit_path.exists():
+                try:
+                    audits = read_tsv(audit_path)
+                except Exception:
+                    audits = []
+            out[model_id_txt] = {
+                "index": merged_index,
+                "review": review_row,
+                "audits": audits,
+            }
+
+        pred_rel = str(index_row.get("predictions_tsv", "")).strip()
+        review_rel = str(index_row.get("review_tsv", "")).strip()
+        audit_rel = str(index_row.get("review_audit", "")).strip()
+        pred_path = (derivatives / pred_rel).resolve() if pred_rel else None
+        review_path = (derivatives / review_rel).resolve() if review_rel else None
+        audit_path = (derivatives / audit_rel).resolve() if audit_rel else None
+
+        if pred_path is not None or review_path is not None:
+            _add_entry(active_model_id or "base-v1", pred_path=pred_path, review_path=review_path, audit_path=audit_path)
+
+        pred_root = self._dir_named(pred_path, "predictions") if pred_path is not None else None
+        review_root = self._dir_named(review_path, "review") if review_path is not None else None
+        models_pred_root = pred_root / "models" if pred_root is not None else None
+        if models_pred_root is not None and models_pred_root.exists():
+            for model_pred_path in sorted(models_pred_root.glob("*/predictions.tsv")):
+                model_id = model_pred_path.parent.name
+                model_review_path = (review_root / "models" / model_id / "review.tsv") if review_root is not None else None
+                model_audit_path = (review_root / "models" / model_id / "review_audit.tsv") if review_root is not None else None
+                _add_entry(model_id, pred_path=model_pred_path, review_path=model_review_path, audit_path=model_audit_path)
+
+        if scan_id and not out:
+            self._log(f"[models] no model artifacts discovered for {scan_id}\n")
+        return out
+
+    def _refresh_profile_model_combo(self, scan_id):
+        previous = self._selected_profile_model_id()
+        active_model_id = str(self._index_rows.get(scan_id, {}).get("model_id", "")).strip()
+        entries = self._model_index_rows.get(scan_id, {})
+        candidate_ids = []
+        for model_id, row in sorted(entries.items(), key=lambda item: self._model_display_label(item[0]).casefold()):
+            if str(row.get("slice_profile_png_path", "")).strip() or str(row.get("preview_png_path", "")).strip():
+                candidate_ids.append(model_id)
+
+        self.profileModelCombo.blockSignals(True)
+        self.profileModelCombo.clear()
+        for model_id in candidate_ids:
+            self.profileModelCombo.addItem(self._model_display_label(model_id), model_id)
+
+        if candidate_ids:
+            target = previous if previous in candidate_ids else (active_model_id if active_model_id in candidate_ids else candidate_ids[0])
+            for idx in range(self._combo_count(self.profileModelCombo)):
+                if str(self.profileModelCombo.itemData(idx) or "").strip() == target:
+                    self.profileModelCombo.setCurrentIndex(idx)
+                    break
+            self.profileModelCombo.enabled = True
+        else:
+            self.profileModelCombo.addItem("Current model", "")
+            self.profileModelCombo.setCurrentIndex(0)
+            self.profileModelCombo.enabled = False
+        self.profileModelCombo.blockSignals(False)
+
+    def _refresh_model_profiles(self):
+        previous = str(self._settings().value("MotionScore/ModelProfile", "base-v1") or "base-v1").strip()
+        models_dir = self._models_dir()
+        profiles = []
+        if models_dir is not None:
+            try:
+                from motionscore.model_registry import list_model_profiles
+
+                profiles = list_model_profiles(models_dir)
+            except Exception as exc:
+                self._log(f"[models] could not read model registry: {exc}\n")
+            if not profiles and self._has_local_models(models_dir):
+                profiles = [{"model_id": "base-v1", "display_name": "Base v1", "version": "v1"}]
+
+        self._model_profiles = list(profiles)
+        self.modelProfileCombo.blockSignals(True)
+        self.modelProfileCombo.clear()
+        for entry in self._model_profiles:
+            model_id = str(entry.get("model_id", "")).strip() or "base-v1"
+            display = str(entry.get("display_name", "")).strip() or model_id
+            version = str(entry.get("version", "")).strip()
+            label = f"{display} ({model_id})" if not version else f"{display} ({model_id}@{version})"
+            self.modelProfileCombo.addItem(label, model_id)
+        count_attr = self.modelProfileCombo.count
+        count = int(count_attr() if callable(count_attr) else count_attr)
+        if count == 0:
+            self.modelProfileCombo.addItem("Base v1 (base-v1)", "base-v1")
+            count = 1
+        for idx in range(count):
+            data = str(self.modelProfileCombo.itemData(idx) or "").strip()
+            if data == previous:
+                self.modelProfileCombo.setCurrentIndex(idx)
+                break
+        self.modelProfileCombo.blockSignals(False)
+
+    def _training_root(self):
+        derivatives = self._derivatives_root()
+        if derivatives is None:
+            return None
+        return derivatives / "training"
+
+    def _retrain_manifest_path(self):
+        root = self._training_root()
+        return None if root is None else root / "train_manifest.tsv"
+
+    def _normalized_retrain_model_id(self):
+        raw = self.retrainModelIdEdit.text.strip()
+        if raw:
+            return re.sub(r"[^a-zA-Z0-9._-]+", "-", raw).strip("-") or "custom-model"
+        return f"custom-{qt.QDateTime.currentDateTime().toString('yyyyMMdd-HHmmss')}"
+
+    def _retrain_output_model_dir(self):
+        models_root = self._models_dir()
+        if models_root is None:
+            return None
+        return models_root / self._normalized_retrain_model_id()
+
+    def _update_training_plot(self, final=False):
+        model_dir = self._training_output_model_dir
+        if model_dir is None:
+            return
+        plot_name = "training_plot.png" if final else "training_plot_live.png"
+        plot_path = Path(model_dir) / plot_name
+        if not plot_path.exists() and final:
+            plot_path = Path(model_dir) / "training_plot_live.png"
+        if not plot_path.exists():
+            return
+        pix = qt.QPixmap(str(plot_path))
+        if pix.isNull():
+            return
+        scaled = pix.scaled(TRAINING_PLOT_WIDTH, TRAINING_PLOT_HEIGHT, qt.Qt.KeepAspectRatio, qt.Qt.SmoothTransformation)
+        self.trainingPlotLabel.setPixmap(scaled)
+        self.trainingPlotLabel.setText("")
+
+    def _update_training_summary(self):
+        model_dir = self._training_output_model_dir
+        if model_dir is None:
+            return
+        metrics_path = Path(model_dir) / "training_metrics.json"
+        if not metrics_path.exists():
+            return
+        try:
+            payload = json.loads(metrics_path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            self._log(f"[train] could not read metrics: {exc}\n")
+            return
+        models = payload.get("models", []) if isinstance(payload, dict) else []
+        test_metrics = [m.get("test", {}) for m in models if isinstance(m, dict)]
+        if not test_metrics:
+            self.trainingMetricsLabel.text = "Holdout: metrics unavailable"
+            return
+        mean_acc = sum(float(m.get("accuracy", 0.0)) for m in test_metrics) / float(len(test_metrics))
+        mean_kappa = sum(float(m.get("weighted_kappa", 0.0)) for m in test_metrics) / float(len(test_metrics))
+        self.trainingMetricsLabel.text = (
+            f"Holdout: models={len(test_metrics)} | accuracy={mean_acc:.3f} | weighted kappa={mean_kappa:.3f}"
+        )
 
     def _derivatives_root(self):
         dataset = self.datasetPathEdit.currentPath.strip()
@@ -802,9 +1184,12 @@ class MotionScoreHRpQCTWidget(ScriptedLoadableModuleWidget):
         return bool(checked_attr() if callable(checked_attr) else checked_attr)
 
     def _set_buttons_enabled(self, enabled):
+        self.loadDatasetButton.enabled = enabled
         self.runButton.enabled = enabled
+        self.manualRunButton.enabled = enabled
         self.refreshButton.enabled = enabled
         self.exportButton.enabled = enabled
+        self.importButton.enabled = enabled
         self.loadScanButton.enabled = enabled
         self.applyButton.enabled = enabled
         self.backButton.enabled = bool(enabled and self._grade_history)
@@ -813,13 +1198,30 @@ class MotionScoreHRpQCTWidget(ScriptedLoadableModuleWidget):
         self.forceReinstallButton.enabled = enabled
         self.trainingModeCheck.enabled = enabled
         self.runModeCombo.enabled = enabled
+        self.modelProfileCombo.enabled = enabled
+        self.sliceStepSpin.enabled = enabled
         self.runScopeCombo.enabled = enabled
         self.reviewScopeCombo.enabled = enabled
         self.clearReviewerCombo.enabled = enabled
         self.autoLoadCheck.enabled = enabled
+        self.prepareRetrainButton.enabled = enabled
+        self.trainHeadButton.enabled = enabled
+        self.trainFullButton.enabled = enabled
+        self.continueTrainButton.enabled = enabled
+        self.retrainModelIdEdit.enabled = enabled
+        self.retrainDisplayNameEdit.enabled = enabled
+        self.retrainSliceCountSpin.enabled = enabled
+        self.retrainPatienceSpin.enabled = enabled
+        self.retrainAugHFlipCheck.enabled = enabled
+        self.retrainAugVFlipCheck.enabled = enabled
+        self.retrainAugRotateCheck.enabled = enabled
+        self.retrainAugCropCheck.enabled = enabled
+        self.retrainEpochsHeadSpin.enabled = enabled
+        self.retrainEpochsFineSpin.enabled = enabled
         for btn in self.quickGradeButtons.values():
             btn.enabled = enabled
         self.interruptButton.enabled = not enabled
+        self.trainInterruptButton.enabled = not enabled
 
     def _run_cli(self, args, on_finish=None):
         try:
@@ -861,6 +1263,13 @@ class MotionScoreHRpQCTWidget(ScriptedLoadableModuleWidget):
                 self.runBox.collapsed = True
             except Exception:
                 pass
+        elif task_name == "train":
+            self._set_progress_idle()
+            self._update_training_plot(final=True)
+            self._update_training_summary()
+        elif task_name == "model-register":
+            self._set_progress_idle()
+            self._refresh_model_profiles()
         else:
             self._set_progress_idle()
         if callback is not None:
@@ -915,7 +1324,17 @@ class MotionScoreHRpQCTWidget(ScriptedLoadableModuleWidget):
         self._set_license_status("One-click setup complete.")
         self._log("[setup] complete: package, license, and local models ready\n")
 
-    def onRunPredict(self):
+    def onLoadDataset(self):
+        self.refreshReview()
+        if self._combo_count(self.scanCombo) > 0:
+            self.scanCombo.setCurrentIndex(0)
+            if self._auto_load_enabled():
+                self.onLoadSelectedScan()
+
+    def onRunManualOnly(self):
+        self.onRunPredict(manual_only=True)
+
+    def onRunPredict(self, manual_only=False):
         dataset = self.datasetPathEdit.currentPath.strip()
         if not dataset:
             slicer.util.errorDisplay("Please choose Dataset Root")
@@ -924,12 +1343,8 @@ class MotionScoreHRpQCTWidget(ScriptedLoadableModuleWidget):
             self._log(f"[setup] core package missing; installing from PyPI ({CORE_PYPI_PACKAGE}).\n")
             if not self._ensure_core_package():
                 return
-
-        run_mode = self._combo_text(self.runModeCombo)
-        manual_only = run_mode == self.RUN_MODE_MANUAL
-        models_dir = None
+        models_dir = self._models_dir()
         if not manual_only:
-            models_dir = self._models_dir()
             if models_dir is None or not models_dir.exists():
                 slicer.util.errorDisplay("Could not resolve local models folder.")
                 return
@@ -946,7 +1361,7 @@ class MotionScoreHRpQCTWidget(ScriptedLoadableModuleWidget):
                     return
 
         selected_scope = self._combo_text(self.runScopeCombo)
-        if selected_scope == self.RUN_SCOPE_ALL and self._all_scans_already_predicted():
+        if selected_scope == self.RUN_SCOPE_ALL and self._all_scans_already_predicted(self._selected_model_id()):
             self._log("[predict] all discovered scans already predicted; refreshing review only.\n")
             self.refreshReview()
             self.progressBar.minimum = 0
@@ -968,8 +1383,10 @@ class MotionScoreHRpQCTWidget(ScriptedLoadableModuleWidget):
         else:
             args.extend(
                 [
-                    "--model-dir",
+                    "--model-root",
                     str(models_dir),
+                    "--model-id",
+                    self._selected_model_id(),
                     "--slice-step",
                     str(int(self.sliceStepSpin.value)),
                 ]
@@ -1153,6 +1570,7 @@ class MotionScoreHRpQCTWidget(ScriptedLoadableModuleWidget):
             self._set_license_status(f"Models fetched and decrypted for version {version}.")
             self._log(f"[license] models fetched: version={version} -> {models_dir}\n")
             self._update_setup_status()
+            self._refresh_model_profiles()
             return True
         except Exception as exc:
             err = str(exc)
@@ -1220,6 +1638,9 @@ class MotionScoreHRpQCTWidget(ScriptedLoadableModuleWidget):
         self._index_rows = {}
         self._review_rows = {}
         self._audit_rows = []
+        self._model_index_rows = {}
+        self._model_review_rows = {}
+        self._model_audit_rows = {}
 
         with index_path.open("r", encoding="utf-8", newline="") as f:
             reader = csv.DictReader(f, delimiter="\t")
@@ -1228,29 +1649,30 @@ class MotionScoreHRpQCTWidget(ScriptedLoadableModuleWidget):
                 if not scan_id:
                     continue
                 self._index_rows[scan_id] = row
+                discovered = self._discover_model_entries_for_scan(derivatives, row)
+                self._model_index_rows[scan_id] = {
+                    model_id: dict(payload.get("index", {}))
+                    for model_id, payload in discovered.items()
+                    if payload.get("index")
+                }
+                self._model_review_rows[scan_id] = {
+                    model_id: dict(payload.get("review", {}))
+                    for model_id, payload in discovered.items()
+                    if payload.get("review")
+                }
+                self._model_audit_rows[scan_id] = {
+                    model_id: list(payload.get("audits", []))
+                    for model_id, payload in discovered.items()
+                    if payload.get("audits")
+                }
 
-                review_rel = row.get("review_tsv", "")
-                if not review_rel:
-                    continue
-                review_path = derivatives / review_rel
-                if not review_path.exists():
-                    continue
-
-                with review_path.open("r", encoding="utf-8", newline="") as rf:
-                    rreader = csv.DictReader(rf, delimiter="\t")
-                    for rrow in rreader:
-                        rid = rrow.get("scan_id", "")
-                        if rid:
-                            self._review_rows[rid] = rrow
-
-                audit_rel = row.get("review_audit", "")
-                if audit_rel:
-                    audit_path = derivatives / audit_rel
-                    if audit_path.exists():
-                        with audit_path.open("r", encoding="utf-8", newline="") as af:
-                            areader = csv.DictReader(af, delimiter="\t")
-                            for arow in areader:
-                                self._audit_rows.append(arow)
+                active_model_id = str(row.get("model_id", "")).strip() or "base-v1"
+                active_review_row = self._model_review_rows.get(scan_id, {}).get(active_model_id)
+                if active_review_row:
+                    self._review_rows[scan_id] = active_review_row
+                active_audits = self._model_audit_rows.get(scan_id, {}).get(active_model_id, [])
+                if active_audits:
+                    self._audit_rows.extend(active_audits)
 
         any_training = any(self._is_training_mode_row(row) for row in self._review_rows.values())
         self.trainingModeCheck.blockSignals(True)
@@ -1398,6 +1820,7 @@ class MotionScoreHRpQCTWidget(ScriptedLoadableModuleWidget):
             return
         self._grade_history = []
         self.backButton.enabled = False
+        self._refresh_model_profiles()
         if self._review_rows:
             self._set_run_scope_items(self._pending_scan_ids())
         else:
@@ -1408,6 +1831,7 @@ class MotionScoreHRpQCTWidget(ScriptedLoadableModuleWidget):
         if not scan_id:
             self.autoLabel.text = "Auto grade: - | confidence: -"
             self._set_selected_manual_grade(None)
+            self._refresh_profile_model_combo("")
             self._clear_profile_plot()
             return
 
@@ -1415,8 +1839,11 @@ class MotionScoreHRpQCTWidget(ScriptedLoadableModuleWidget):
         if row is None:
             self.autoLabel.text = "Auto grade: - | confidence: -"
             self._set_selected_manual_grade(None)
+            self._refresh_profile_model_combo(scan_id)
             self._clear_profile_plot()
             return
+
+        self._refresh_profile_model_combo(scan_id)
 
         auto_grade = row.get("automatic_grade", "-")
         auto_conf = row.get("automatic_confidence", "-")
@@ -1539,6 +1966,18 @@ class MotionScoreHRpQCTWidget(ScriptedLoadableModuleWidget):
         self.backButton.enabled = bool(self._grade_history)
         self._refresh_and_load_next(previous_scan_id=scan_id)
 
+    def onProfileModelChanged(self, *_args):
+        scan_id = self._combo_text(self.scanCombo)
+        if not scan_id:
+            return
+        row = self._review_rows.get(scan_id, {})
+        training_pending = self._is_training_mode_row(row) and not str(row.get("manual_grade", "")).strip()
+        blind_active = bool(self.trainingModeCheck.checked) or training_pending
+        if blind_active:
+            self._show_profile_whiteout()
+            return
+        self._update_profile_plot(scan_id)
+
     def onClearGrades(self):
         derivatives = self._derivatives_root()
         if derivatives is None:
@@ -1575,6 +2014,135 @@ class MotionScoreHRpQCTWidget(ScriptedLoadableModuleWidget):
             str(derivatives),
         ]
         self._run_cli(args)
+
+    def onImportFinalGrades(self):
+        derivatives = self._derivatives_root()
+        if derivatives is None:
+            slicer.util.errorDisplay("Cannot resolve results root")
+            return
+        file_path = qt.QFileDialog.getOpenFileName(
+            slicer.util.mainWindow(),
+            "Import Final Grades",
+            str(derivatives),
+            "Tables (*.tsv *.csv);;All Files (*)",
+        )
+        if isinstance(file_path, tuple):
+            file_path = file_path[0]
+        if not file_path:
+            return
+        args = [
+            "import-final-grades",
+            str(derivatives),
+            "--input",
+            str(file_path),
+            "--reviewer",
+            self.reviewerEdit.text.strip() or "import",
+        ]
+        self._run_cli(args, on_finish=self.refreshReview)
+
+    def _prepare_retrain_then(self, callback):
+        manifest_path = self._retrain_manifest_path()
+        derivatives = self._derivatives_root()
+        if derivatives is None or manifest_path is None:
+            slicer.util.errorDisplay("Please choose Dataset Root")
+            return
+        args = [
+            "train-prepare",
+            str(derivatives),
+            "--output",
+            str(manifest_path),
+            "--slice-count",
+            str(int(self.retrainSliceCountSpin.value)),
+        ]
+        self._run_cli(args, on_finish=callback)
+
+    def onPrepareRetrainManifest(self):
+        self._prepare_retrain_then(None)
+
+    def _run_train(self, *, classifier_only=False, continue_training=False):
+        manifest_path = self._retrain_manifest_path()
+        output_model_dir = self._retrain_output_model_dir()
+        models_root = self._models_dir()
+        if manifest_path is None or output_model_dir is None or models_root is None:
+            slicer.util.errorDisplay("Please choose Dataset Root")
+            return
+        output_model_dir.mkdir(parents=True, exist_ok=True)
+        self._training_output_model_dir = output_model_dir
+        args = [
+            "train",
+            "--manifest",
+            str(manifest_path),
+            "--output-model-dir",
+            str(output_model_dir),
+            "--device",
+            (self._combo_text(self.deviceCombo) or "auto").lower(),
+            "--epochs-head",
+            str(int(self.retrainEpochsHeadSpin.value)),
+            "--epochs-finetune",
+            str(0 if classifier_only else int(self.retrainEpochsFineSpin.value)),
+            "--early-stopping-patience",
+            str(int(self.retrainPatienceSpin.value)),
+        ]
+        if continue_training and any(output_model_dir.glob("DNN_*.pt")):
+            args.extend(["--init-model-dir", str(output_model_dir)])
+        else:
+            args.extend(["--model-root", str(models_root), "--init-model-id", self._selected_model_id()])
+        aug_h_attr = self.retrainAugHFlipCheck.checked
+        aug_v_attr = self.retrainAugVFlipCheck.checked
+        aug_rotate_attr = self.retrainAugRotateCheck.checked
+        aug_crop_attr = self.retrainAugCropCheck.checked
+        if not bool(aug_h_attr() if callable(aug_h_attr) else aug_h_attr):
+            args.append("--no-aug-hflip")
+        if not bool(aug_v_attr() if callable(aug_v_attr) else aug_v_attr):
+            args.append("--no-aug-vflip")
+        if bool(aug_rotate_attr() if callable(aug_rotate_attr) else aug_rotate_attr):
+            args.append("--aug-rotate")
+        if bool(aug_crop_attr() if callable(aug_crop_attr) else aug_crop_attr):
+            args.append("--aug-crop")
+        self.trainingMetricsLabel.text = "Holdout: training in progress..."
+        self.trainingPlotLabel.setText("Training plot: waiting for updates...")
+        self._run_cli(args, on_finish=self._register_trained_model)
+
+    def _register_trained_model(self):
+        output_model_dir = self._training_output_model_dir
+        models_root = self._models_dir()
+        if output_model_dir is None or models_root is None:
+            return
+        model_id = self._normalized_retrain_model_id()
+        display_name = self.retrainDisplayNameEdit.text.strip() or model_id
+        args = [
+            "model-register",
+            "--model-root",
+            str(models_root),
+            "--model-id",
+            model_id,
+            "--model-dir",
+            str(output_model_dir),
+            "--display-name",
+            display_name,
+            "--source-model-id",
+            self._selected_model_id(),
+            "--training-manifest",
+            str(self._retrain_manifest_path() or ""),
+            "--metrics-path",
+            str(output_model_dir / "training_metrics.json"),
+            "--make-default",
+        ]
+        self._run_cli(args, on_finish=self._after_model_register)
+
+    def _after_model_register(self):
+        self._refresh_model_profiles()
+        self._update_training_summary()
+        self._update_training_plot(final=True)
+
+    def onTrainClassifierOnly(self):
+        self._prepare_retrain_then(lambda: self._run_train(classifier_only=True, continue_training=False))
+
+    def onTrainFullModel(self):
+        self._prepare_retrain_then(lambda: self._run_train(classifier_only=False, continue_training=False))
+
+    def onContinueTraining(self):
+        self._prepare_retrain_then(lambda: self._run_train(classifier_only=False, continue_training=True))
 
     def onLoadSelectedScan(self):
         scan_id = self._combo_text(self.scanCombo)
@@ -1704,7 +2272,7 @@ class MotionScoreHRpQCTWidget(ScriptedLoadableModuleWidget):
             self._log(f"[run-scope] could not discover scans for dropdown: {exc}\n")
             return []
 
-    def _all_scans_already_predicted(self):
+    def _all_scans_already_predicted(self, model_id=None):
         derivatives = self._derivatives_root()
         if derivatives is None:
             return False
@@ -1717,12 +2285,14 @@ class MotionScoreHRpQCTWidget(ScriptedLoadableModuleWidget):
             return False
 
         indexed_scan_ids = set()
+        selected_model_id = str(model_id or self._selected_model_id() or "").strip()
         try:
             with index_path.open("r", encoding="utf-8", newline="") as f:
                 reader = csv.DictReader(f, delimiter="\t")
                 for row in reader:
                     scan_id = str(row.get("scan_id", "")).strip()
-                    if scan_id:
+                    row_model_id = str(row.get("model_id", "")).strip()
+                    if scan_id and row_model_id == selected_model_id:
                         indexed_scan_ids.add(scan_id)
         except Exception as exc:
             self._log(f"[predict] could not read existing index for skip-check: {exc}\n")
@@ -1732,9 +2302,10 @@ class MotionScoreHRpQCTWidget(ScriptedLoadableModuleWidget):
 
     def _on_process_output(self, text):
         self._log(text)
-        if self._active_task_name != "predict":
-            return
-        self._update_predict_progress_from_output(text)
+        if self._active_task_name == "predict":
+            self._update_predict_progress_from_output(text)
+        elif self._active_task_name == "train":
+            self._update_training_plot(final=False)
 
     def _combo_count(self, combo):
         count_attr = combo.count
@@ -1881,37 +2452,39 @@ class MotionScoreHRpQCTWidget(ScriptedLoadableModuleWidget):
             value = re.sub(r"\s+", " ", value)
             return value.casefold()
 
-        # AI reference grades from current review table.
-        ai_by_scan = {}
-        for scan_id, row in self._review_rows.items():
-            try:
-                grade = int(float(str(row.get("automatic_grade", "")).strip()))
-            except Exception:
-                continue
-            if 1 <= grade <= 5:
-                ai_by_scan[scan_id] = grade
+        ai_grade_maps = {}
+        for scan_id, model_rows in self._model_review_rows.items():
+            for model_id, row in model_rows.items():
+                try:
+                    grade = int(float(str(row.get("automatic_grade", "")).strip()))
+                except Exception:
+                    continue
+                if 1 <= grade <= 5:
+                    ai_grade_maps.setdefault(str(model_id).strip(), {})[scan_id] = grade
 
         # Build operator grades from current review rows first (most reliable snapshot),
         # then overlay audit history to preserve clear/apply ordering when available.
         op_scan_grade = {}
         reviewer_label_by_canon = {}
-        for scan_id, row in self._review_rows.items():
-            reviewer_raw = str(row.get("reviewer", "")).strip()
-            reviewer = _canon_reviewer(reviewer_raw)
-            if not reviewer:
-                continue
-            reviewer_label_by_canon.setdefault(reviewer, reviewer_raw)
-            try:
-                grade = int(float(str(row.get("manual_grade", "")).strip()))
-            except Exception:
-                continue
-            if 1 <= grade <= 5:
-                op_scan_grade[(reviewer, scan_id)] = grade
+        for scan_id, model_rows in self._model_review_rows.items():
+            for row in model_rows.values():
+                reviewer_raw = str(row.get("reviewer", "")).strip()
+                reviewer = _canon_reviewer(reviewer_raw)
+                if not reviewer:
+                    continue
+                reviewer_label_by_canon.setdefault(reviewer, reviewer_raw)
+                try:
+                    grade = int(float(str(row.get("manual_grade", "")).strip()))
+                except Exception:
+                    continue
+                if 1 <= grade <= 5:
+                    op_scan_grade[(reviewer, scan_id)] = grade
 
-        audit_rows = sorted(
-            self._audit_rows,
-            key=lambda row: str(row.get("timestamp", "")),
-        )
+        audit_rows = []
+        for scan_audits in self._model_audit_rows.values():
+            for model_audits in scan_audits.values():
+                audit_rows.extend(model_audits)
+        audit_rows = sorted(audit_rows, key=lambda row: str(row.get("timestamp", "")))
         for row in audit_rows:
             scan_id = str(row.get("scan_id", "")).strip()
             reviewer_raw = str(row.get("reviewer", "")).strip()
@@ -1934,8 +2507,12 @@ class MotionScoreHRpQCTWidget(ScriptedLoadableModuleWidget):
         op_counts = {}
         for op in operators:
             op_counts[op] = len({sid for (op_key, sid), _g in op_scan_grade.items() if op_key == op})
-        participant_ids = ["AI"] + operators
-        participants = ["AI"] + [f"{reviewer_label_by_canon.get(op, op)} (graded={op_counts.get(op, 0)})" for op in operators]
+        ai_models = sorted(ai_grade_maps.keys(), key=lambda model_id: self._model_display_label(model_id).casefold())
+        participant_ids = [f"ai::{model_id}" for model_id in ai_models] + operators
+        participants = [
+            f"AI {self._model_display_label(model_id)} (predicted={len(ai_grade_maps.get(model_id, {}))})"
+            for model_id in ai_models
+        ] + [f"{reviewer_label_by_canon.get(op, op)} (graded={op_counts.get(op, 0)})" for op in operators]
         n = len(participant_ids)
         self.agreementMatrixTable.setRowCount(n)
         self.agreementMatrixTable.setColumnCount(n)
@@ -1957,22 +2534,37 @@ class MotionScoreHRpQCTWidget(ScriptedLoadableModuleWidget):
                     continue
 
                 pairs = []
-                if p_i == "AI":
-                    scan_to_grade_j = {
-                        sid: g for (op, sid), g in op_scan_grade.items() if op == p_j
-                    }
-                    for sid, g_ai in ai_by_scan.items():
-                        g_j = scan_to_grade_j.get(sid)
-                        if g_j is not None:
-                            pairs.append((g_ai, g_j))
-                elif p_j == "AI":
+                if p_i.startswith("ai::"):
+                    model_i = p_i.split("::", 1)[1]
+                    scan_to_grade_i = ai_grade_maps.get(model_i, {})
+                    if p_j.startswith("ai::"):
+                        model_j = p_j.split("::", 1)[1]
+                        scan_to_grade_j = ai_grade_maps.get(model_j, {})
+                        common = set(scan_to_grade_i.keys()).intersection(set(scan_to_grade_j.keys()))
+                        for sid in sorted(common):
+                            pairs.append((scan_to_grade_i[sid], scan_to_grade_j[sid]))
+                    else:
+                        scan_to_grade_j = {
+                            sid: g for (op, sid), g in op_scan_grade.items() if op == p_j
+                        }
+                        for sid, g_i in scan_to_grade_i.items():
+                            g_j = scan_to_grade_j.get(sid)
+                            if g_j is not None:
+                                pairs.append((g_i, g_j))
+                elif p_j.startswith("ai::"):
+                    model_j = p_j.split("::", 1)[1]
+                    scan_to_grade_j = ai_grade_maps.get(model_j, {})
                     scan_to_grade_i = {
                         sid: g for (op, sid), g in op_scan_grade.items() if op == p_i
                     }
-                    for sid, g_ai in ai_by_scan.items():
-                        g_i = scan_to_grade_i.get(sid)
-                        if g_i is not None:
-                            pairs.append((g_i, g_ai))
+                    for sid, g_i in scan_to_grade_i.items():
+                        g_j = scan_to_grade_j.get(sid)
+                        if g_j is not None:
+                            pairs.append((g_i, g_j))
+                elif p_i == "AI":
+                    scan_to_grade_j = {
+                        sid: g for (op, sid), g in op_scan_grade.items() if op == p_j
+                    }
                 else:
                     scan_to_grade_i = {
                         sid: g for (op, sid), g in op_scan_grade.items() if op == p_i
@@ -2046,48 +2638,6 @@ class MotionScoreHRpQCTWidget(ScriptedLoadableModuleWidget):
             return
         self._render_profile_plot(self._loaded_scan_id)
 
-    def _current_slice_cursor(self):
-        node = self._loaded_volume_node
-        if node is None:
-            return None, None
-        image_data = node.GetImageData() if hasattr(node, "GetImageData") else None
-        if image_data is None:
-            return None, None
-        dims = image_data.GetDimensions()
-        if len(dims) < 3:
-            return None, None
-        n_slices = int(dims[2])
-        if n_slices <= 0:
-            return None, None
-
-        self._install_slice_observer()
-        if self._slice_observer_node is None:
-            return None, n_slices
-
-        # Slicer API compatibility: some versions fill an output matrix argument,
-        # newer versions return the matrix directly with no arguments.
-        slice_to_ras = vtk.vtkMatrix4x4()
-        try:
-            self._slice_observer_node.GetSliceToRAS(slice_to_ras)
-        except TypeError:
-            returned = self._slice_observer_node.GetSliceToRAS()
-            if returned is not None:
-                slice_to_ras.DeepCopy(returned)
-        ras_h = [
-            float(slice_to_ras.GetElement(0, 3)),
-            float(slice_to_ras.GetElement(1, 3)),
-            float(slice_to_ras.GetElement(2, 3)),
-            1.0,
-        ]
-
-        ras_to_ijk = vtk.vtkMatrix4x4()
-        node.GetRASToIJKMatrix(ras_to_ijk)
-        ijk_h = [0.0, 0.0, 0.0, 0.0]
-        ras_to_ijk.MultiplyPoint(ras_h, ijk_h)
-        slice_idx = int(round(float(ijk_h[2])))
-        slice_idx = max(0, min(n_slices - 1, slice_idx))
-        return slice_idx, n_slices
-
     def _slice_step_mm(self):
         node = self._loaded_volume_node
         if node is None:
@@ -2119,8 +2669,7 @@ class MotionScoreHRpQCTWidget(ScriptedLoadableModuleWidget):
         except Exception:
             return False
 
-        step_mm = self._slice_step_mm()
-        target_offset = current_offset + float(steps_i) * step_mm
+        target_offset = current_offset + float(steps_i) * self._slice_step_mm()
         try:
             self._slice_observer_node.SetSliceOffset(target_offset)
         except Exception:
@@ -2194,6 +2743,48 @@ class MotionScoreHRpQCTWidget(ScriptedLoadableModuleWidget):
             self._log(f"[profile] wheel event handling failed: {exc}\n")
         return False
 
+    def _current_slice_cursor(self):
+        node = self._loaded_volume_node
+        if node is None:
+            return None, None
+        image_data = node.GetImageData() if hasattr(node, "GetImageData") else None
+        if image_data is None:
+            return None, None
+        dims = image_data.GetDimensions()
+        if len(dims) < 3:
+            return None, None
+        n_slices = int(dims[2])
+        if n_slices <= 0:
+            return None, None
+
+        self._install_slice_observer()
+        if self._slice_observer_node is None:
+            return None, n_slices
+
+        # Slicer API compatibility: some versions fill an output matrix argument,
+        # newer versions return the matrix directly with no arguments.
+        slice_to_ras = vtk.vtkMatrix4x4()
+        try:
+            self._slice_observer_node.GetSliceToRAS(slice_to_ras)
+        except TypeError:
+            returned = self._slice_observer_node.GetSliceToRAS()
+            if returned is not None:
+                slice_to_ras.DeepCopy(returned)
+        ras_h = [
+            float(slice_to_ras.GetElement(0, 3)),
+            float(slice_to_ras.GetElement(1, 3)),
+            float(slice_to_ras.GetElement(2, 3)),
+            1.0,
+        ]
+
+        ras_to_ijk = vtk.vtkMatrix4x4()
+        node.GetRASToIJKMatrix(ras_to_ijk)
+        ijk_h = [0.0, 0.0, 0.0, 0.0]
+        ras_to_ijk.MultiplyPoint(ras_h, ijk_h)
+        slice_idx = int(round(float(ijk_h[2])))
+        slice_idx = max(0, min(n_slices - 1, slice_idx))
+        return slice_idx, n_slices
+
     def _grade_for_scan(self, scan_id):
         if self._selected_manual_grade in {1, 2, 3, 4, 5}:
             return int(self._selected_manual_grade)
@@ -2226,8 +2817,6 @@ class MotionScoreHRpQCTWidget(ScriptedLoadableModuleWidget):
         if scan_id == self._loaded_scan_id:
             slice_idx, n_slices = self._current_slice_cursor()
             if slice_idx is not None and n_slices is not None and n_slices > 1:
-                # Keep cursor mapping aligned with profile PNG x-domain [0, N]
-                # where each slice is rendered at center x = idx + 0.5.
                 frac = float(slice_idx + 0.5) / float(n_slices)
                 x_min = int(round(float(max(0, out_pix.width() - 1)) * PROFILE_PLOT_LEFT_FRACTION))
                 x_max = int(round(float(max(0, out_pix.width() - 1)) * PROFILE_PLOT_RIGHT_FRACTION))
@@ -2251,7 +2840,10 @@ class MotionScoreHRpQCTWidget(ScriptedLoadableModuleWidget):
             self._clear_profile_plot()
             return
 
-        row = self._index_rows.get(scan_id, {})
+        selected_model_id = self._selected_profile_model_id()
+        row = self._model_index_rows.get(scan_id, {}).get(selected_model_id) if selected_model_id else None
+        if not row:
+            row = self._index_rows.get(scan_id, {})
         rel_path = (
             row.get("slice_profile_png_path", "").strip()
             or row.get("preview_png_path", "").strip()
