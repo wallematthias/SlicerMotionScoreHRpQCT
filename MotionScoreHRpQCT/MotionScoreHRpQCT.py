@@ -28,7 +28,7 @@ from slicer.ScriptedLoadableModule import (
 )
 
 
-MODULE_VERSION = "0.1.0"
+MODULE_VERSION = "0.1.1"
 DEFAULT_LICENSE_API = "https://motionscore-license-api.matthias-walle.workers.dev"
 LICENSE_HTTP_USER_AGENT = "MotionScoreSlicer/0.1 (+3D-Slicer; Python urllib)"
 CORE_PYPI_PACKAGE = "motionscorehrpqct"
@@ -166,6 +166,8 @@ class _ProfileWheelEventFilter(qt.QObject):
 
 class MotionScoreHRpQCTWidget(ScriptedLoadableModuleWidget):
     RUN_SCOPE_ALL = "All scans"
+    RUN_MODE_AI = "AI Assisted"
+    RUN_MODE_MANUAL = "Manual Grading Only"
     REVIEW_SCOPE_PENDING = "Pending only"
     REVIEW_SCOPE_ALL = "Low-confidence scans (re-review)"
     CLEAR_ALL_OPERATORS = "All operators"
@@ -308,6 +310,12 @@ class MotionScoreHRpQCTWidget(ScriptedLoadableModuleWidget):
 
         self.runScopeCombo = qt.QComboBox()
         self.runScopeCombo.addItem(self.RUN_SCOPE_ALL)
+        self.runModeCombo = qt.QComboBox()
+        self.runModeCombo.addItems([self.RUN_MODE_AI, self.RUN_MODE_MANUAL])
+        saved_run_mode = str(self._settings().value("MotionScore/RunMode", self.RUN_MODE_AI) or self.RUN_MODE_AI)
+        if saved_run_mode not in {self.RUN_MODE_AI, self.RUN_MODE_MANUAL}:
+            saved_run_mode = self.RUN_MODE_AI
+        self.runModeCombo.setCurrentText(saved_run_mode)
         self.deviceCombo = qt.QComboBox()
         self.deviceCombo.addItems(["auto", "mps", "cpu", "cuda"])
         saved_device = str(self._settings().value("MotionScore/TorchDevice", "auto") or "auto").strip().lower()
@@ -439,6 +447,7 @@ class MotionScoreHRpQCTWidget(ScriptedLoadableModuleWidget):
         additionalForm = qt.QFormLayout()
         additionalForm.addRow("Confidence Threshold", self.confidenceSpin)
         additionalForm.addRow("Training Mode", self.trainingModeCheck)
+        additionalForm.addRow("Run Mode", self.runModeCombo)
         additionalForm.addRow("Fast: Every N-th Slice", self.sliceStepSpin)
         additionalForm.addRow("Torch Device", self.deviceCombo)
         additionalForm.addRow("Run Scope", self.runScopeCombo)
@@ -486,6 +495,7 @@ class MotionScoreHRpQCTWidget(ScriptedLoadableModuleWidget):
         self.licenseEmailEdit.editingFinished.connect(self._persist_license_settings)
         self.licenseKeyEdit.editingFinished.connect(self._persist_license_settings)
         self.deviceCombo.currentTextChanged.connect(self._persist_runtime_settings)
+        self.runModeCombo.currentTextChanged.connect(self._persist_runtime_settings)
         self.sliceStepSpin.valueChanged.connect(self._persist_runtime_settings)
 
         self._install_grading_shortcuts()
@@ -535,6 +545,7 @@ class MotionScoreHRpQCTWidget(ScriptedLoadableModuleWidget):
 
     def _persist_runtime_settings(self):
         self._settings().setValue("MotionScore/TorchDevice", self._combo_text(self.deviceCombo))
+        self._settings().setValue("MotionScore/RunMode", self._combo_text(self.runModeCombo))
         self._settings().setValue("MotionScore/SliceStep", int(self.sliceStepSpin.value))
 
     def _install_grading_shortcuts(self):
@@ -801,6 +812,7 @@ class MotionScoreHRpQCTWidget(ScriptedLoadableModuleWidget):
         self.quickSetupButton.enabled = enabled
         self.forceReinstallButton.enabled = enabled
         self.trainingModeCheck.enabled = enabled
+        self.runModeCombo.enabled = enabled
         self.runScopeCombo.enabled = enabled
         self.reviewScopeCombo.enabled = enabled
         self.clearReviewerCombo.enabled = enabled
@@ -912,21 +924,26 @@ class MotionScoreHRpQCTWidget(ScriptedLoadableModuleWidget):
             self._log(f"[setup] core package missing; installing from PyPI ({CORE_PYPI_PACKAGE}).\n")
             if not self._ensure_core_package():
                 return
-        models_dir = self._models_dir()
-        if models_dir is None or not models_dir.exists():
-            slicer.util.errorDisplay("Could not resolve local models folder.")
-            return
-        has_models = self._has_local_models(models_dir)
-        if not has_models:
-            self._log("[setup] no local model files found; running one-click setup.\n")
-            self.onQuickSetup()
+
+        run_mode = self._combo_text(self.runModeCombo)
+        manual_only = run_mode == self.RUN_MODE_MANUAL
+        models_dir = None
+        if not manual_only:
+            models_dir = self._models_dir()
+            if models_dir is None or not models_dir.exists():
+                slicer.util.errorDisplay("Could not resolve local models folder.")
+                return
             has_models = self._has_local_models(models_dir)
             if not has_models:
-                slicer.util.errorDisplay(
-                    "No model files available yet.\n"
-                    "Please complete setup (request key, activate, download models), then try again."
-                )
-                return
+                self._log("[setup] no local model files found; running one-click setup.\n")
+                self.onQuickSetup()
+                has_models = self._has_local_models(models_dir)
+                if not has_models:
+                    slicer.util.errorDisplay(
+                        "No model files available yet.\n"
+                        "Please complete setup (request key, activate, download models), then try again."
+                    )
+                    return
 
         selected_scope = self._combo_text(self.runScopeCombo)
         if selected_scope == self.RUN_SCOPE_ALL and self._all_scans_already_predicted():
@@ -943,16 +960,23 @@ class MotionScoreHRpQCTWidget(ScriptedLoadableModuleWidget):
             dataset,
             "--confidence-threshold",
             str(int(self.confidenceSpin.value)),
-            "--model-dir",
-            str(models_dir),
             "--output-root",
             dataset,
-            "--slice-step",
-            str(int(self.sliceStepSpin.value)),
         ]
-        selected_device = (self._combo_text(self.deviceCombo) or "auto").lower()
-        if selected_device != "auto":
-            args.extend(["--device", selected_device])
+        if manual_only:
+            args.append("--manual-only")
+        else:
+            args.extend(
+                [
+                    "--model-dir",
+                    str(models_dir),
+                    "--slice-step",
+                    str(int(self.sliceStepSpin.value)),
+                ]
+            )
+            selected_device = (self._combo_text(self.deviceCombo) or "auto").lower()
+            if selected_device != "auto":
+                args.extend(["--device", selected_device])
         if self._training_mode_enabled():
             args.append("--training-mode")
         if selected_scope and selected_scope != self.RUN_SCOPE_ALL:
@@ -1396,16 +1420,21 @@ class MotionScoreHRpQCTWidget(ScriptedLoadableModuleWidget):
 
         auto_grade = row.get("automatic_grade", "-")
         auto_conf = row.get("automatic_confidence", "-")
+        manual_mode = self._is_manual_mode_row(row)
         training_pending = self._is_training_mode_row(row) and not str(row.get("manual_grade", "")).strip()
         blind_active = bool(self.trainingModeCheck.checked) or training_pending
-        if blind_active:
+        if manual_mode:
+            self.autoLabel.text = "Manual-only mode: no AI suggestion."
+            self._set_selected_manual_grade(None)
+            self._update_profile_plot(scan_id)
+        elif blind_active:
             self.autoLabel.text = "Training mode: prediction hidden until manual grade is submitted."
             self._set_selected_manual_grade(None)
             self._show_profile_whiteout()
         else:
             self.autoLabel.text = f"Auto grade: {auto_grade} | confidence: {auto_conf}%"
             self._update_profile_plot(scan_id)
-        if not blind_active:
+        if not blind_active and not manual_mode:
             try:
                 self._set_selected_manual_grade(int(float(auto_grade)), suggested=True)
             except Exception:
@@ -1802,6 +1831,10 @@ class MotionScoreHRpQCTWidget(ScriptedLoadableModuleWidget):
 
     def _is_training_mode_row(self, row):
         text = str(row.get("training_mode", "")).strip().lower()
+        return text in {"1", "true", "yes", "y", "on"}
+
+    def _is_manual_mode_row(self, row):
+        text = str(row.get("manual_mode", "")).strip().lower()
         return text in {"1", "true", "yes", "y", "on"}
 
     def _update_agreement_summary(self):
