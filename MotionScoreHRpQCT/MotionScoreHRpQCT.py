@@ -4,6 +4,7 @@ import csv
 import hashlib
 import io
 import json
+import math
 import os
 import platform
 import re
@@ -37,6 +38,11 @@ PROFILE_PLOT_LEFT_FRACTION = 0.11
 PROFILE_PLOT_RIGHT_FRACTION = 0.89
 TRAINING_PLOT_WIDTH = 760
 TRAINING_PLOT_HEIGHT = 280
+
+
+def read_tsv(path):
+    with Path(path).open("r", encoding="utf-8", newline="") as handle:
+        return list(csv.DictReader(handle, delimiter="\t"))
 
 
 class MotionScoreHRpQCT(ScriptedLoadableModule):
@@ -462,7 +468,6 @@ class MotionScoreHRpQCTWidget(ScriptedLoadableModuleWidget):
         additionalForm.addRow("Training Mode", self.trainingModeCheck)
         additionalForm.addRow("Run Mode", self.runModeCombo)
         additionalForm.addRow("Fast: Every N-th Slice", self.sliceStepSpin)
-        additionalForm.addRow("Torch Device", self.deviceCombo)
         additionalForm.addRow("Run Scope", self.runScopeCombo)
         additionalForm.addRow("Auto Load", self.autoLoadCheck)
         additionalLayout.addLayout(additionalForm)
@@ -479,8 +484,6 @@ class MotionScoreHRpQCTWidget(ScriptedLoadableModuleWidget):
         clearRow.addWidget(self.clearReviewerCombo)
         clearRow.addWidget(self.clearButton)
         additionalForm.addRow("Clear Reviewer", clearRow)
-
-        self.layout.addWidget(self.additionalOptionsBox)
 
         self.retrainBox = ctk.ctkCollapsibleButton()
         self.retrainBox.text = "Retrain"
@@ -510,6 +513,9 @@ class MotionScoreHRpQCTWidget(ScriptedLoadableModuleWidget):
         self.retrainPatienceSpin.maximum = 100
         self.retrainPatienceSpin.value = int(self._settings().value("MotionScore/RetrainPatience", 10) or 10)
         retrainForm.addRow("Early Stopping Patience", self.retrainPatienceSpin)
+
+        self.deviceCombo.setToolTip("Torch device used for prediction and retraining.")
+        retrainForm.addRow("Torch Device", self.deviceCombo)
 
         self.retrainAugHFlipCheck = qt.QCheckBox("Horizontal flip")
         self.retrainAugHFlipCheck.setChecked(bool(int(self._settings().value("MotionScore/RetrainAugHFlip", 1) or 1)))
@@ -565,6 +571,7 @@ class MotionScoreHRpQCTWidget(ScriptedLoadableModuleWidget):
         retrainLayout.addWidget(self.trainingPlotLabel)
 
         self.layout.addWidget(self.retrainBox)
+        self.layout.addWidget(self.additionalOptionsBox)
 
         self.consoleBox = ctk.ctkCollapsibleButton()
         self.consoleBox.text = "Console"
@@ -2664,12 +2671,32 @@ class MotionScoreHRpQCTWidget(ScriptedLoadableModuleWidget):
         self._install_slice_observer()
         if self._slice_observer_node is None:
             return False
-        try:
-            current_offset = float(self._slice_observer_node.GetSliceOffset())
-        except Exception:
+        slice_idx, n_slices, ijk_h, slice_to_ras = self._current_slice_geometry()
+        if slice_idx is None or n_slices is None or ijk_h is None or slice_to_ras is None:
             return False
 
-        target_offset = current_offset + float(steps_i) * self._slice_step_mm()
+        target_idx = max(0, min(n_slices - 1, slice_idx + steps_i))
+        if target_idx == slice_idx:
+            return False
+
+        ijk_to_ras = vtk.vtkMatrix4x4()
+        self._loaded_volume_node.GetIJKToRASMatrix(ijk_to_ras)
+        target_ijk_h = [float(ijk_h[0]), float(ijk_h[1]), float(target_idx), 1.0]
+        target_ras_h = [0.0, 0.0, 0.0, 0.0]
+        ijk_to_ras.MultiplyPoint(target_ijk_h, target_ras_h)
+
+        normal = [
+            float(slice_to_ras.GetElement(0, 2)),
+            float(slice_to_ras.GetElement(1, 2)),
+            float(slice_to_ras.GetElement(2, 2)),
+        ]
+        normal_norm = math.sqrt(sum(component * component for component in normal))
+        if normal_norm <= 0.0:
+            return False
+        target_offset = sum(
+            target_ras_h[axis] * (normal[axis] / normal_norm)
+            for axis in range(3)
+        )
         try:
             self._slice_observer_node.SetSliceOffset(target_offset)
         except Exception:
@@ -2743,23 +2770,23 @@ class MotionScoreHRpQCTWidget(ScriptedLoadableModuleWidget):
             self._log(f"[profile] wheel event handling failed: {exc}\n")
         return False
 
-    def _current_slice_cursor(self):
+    def _current_slice_geometry(self):
         node = self._loaded_volume_node
         if node is None:
-            return None, None
+            return None, None, None, None
         image_data = node.GetImageData() if hasattr(node, "GetImageData") else None
         if image_data is None:
-            return None, None
+            return None, None, None, None
         dims = image_data.GetDimensions()
         if len(dims) < 3:
-            return None, None
+            return None, None, None, None
         n_slices = int(dims[2])
         if n_slices <= 0:
-            return None, None
+            return None, None, None, None
 
         self._install_slice_observer()
         if self._slice_observer_node is None:
-            return None, n_slices
+            return None, n_slices, None, None
 
         # Slicer API compatibility: some versions fill an output matrix argument,
         # newer versions return the matrix directly with no arguments.
@@ -2783,6 +2810,10 @@ class MotionScoreHRpQCTWidget(ScriptedLoadableModuleWidget):
         ras_to_ijk.MultiplyPoint(ras_h, ijk_h)
         slice_idx = int(round(float(ijk_h[2])))
         slice_idx = max(0, min(n_slices - 1, slice_idx))
+        return slice_idx, n_slices, ijk_h, slice_to_ras
+
+    def _current_slice_cursor(self):
+        slice_idx, n_slices, _ijk_h, _slice_to_ras = self._current_slice_geometry()
         return slice_idx, n_slices
 
     def _grade_for_scan(self, scan_id):
