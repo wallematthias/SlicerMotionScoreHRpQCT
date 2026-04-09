@@ -2193,7 +2193,9 @@ class MotionScoreHRpQCTWidget(ScriptedLoadableModuleWidget):
         if scan_id == self._loaded_scan_id:
             slice_idx, n_slices = self._current_slice_cursor()
             if slice_idx is not None and n_slices is not None and n_slices > 1:
-                frac = float(slice_idx) / float(n_slices - 1)
+                # Keep cursor mapping aligned with profile PNG x-domain [0, N]
+                # where each slice is rendered at center x = idx + 0.5.
+                frac = float(slice_idx + 0.5) / float(n_slices)
                 x_min = int(round(float(max(0, out_pix.width() - 1)) * PROFILE_PLOT_LEFT_FRACTION))
                 x_max = int(round(float(max(0, out_pix.width() - 1)) * PROFILE_PLOT_RIGHT_FRACTION))
                 if x_max <= x_min:
