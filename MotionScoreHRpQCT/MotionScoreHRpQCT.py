@@ -29,7 +29,7 @@ from slicer.ScriptedLoadableModule import (
 )
 
 
-MODULE_VERSION = "0.1.1"
+MODULE_VERSION = "0.1.2"
 DEFAULT_LICENSE_API = "https://motionscore-license-api.matthias-walle.workers.dev"
 LICENSE_HTTP_USER_AGENT = "MotionScoreSlicer/0.1 (+3D-Slicer; Python urllib)"
 CORE_PYPI_PACKAGE = "motionscorehrpqct"
@@ -502,11 +502,19 @@ class MotionScoreHRpQCTWidget(ScriptedLoadableModuleWidget):
         self.retrainDisplayNameEdit.setPlaceholderText("Custom retrain")
         retrainForm.addRow("Display Name", self.retrainDisplayNameEdit)
 
+        self.retrainBaseModelCombo = qt.QComboBox()
+        retrainForm.addRow("Base Model", self.retrainBaseModelCombo)
+
         self.retrainSliceCountSpin = qt.QSpinBox()
         self.retrainSliceCountSpin.minimum = 0
         self.retrainSliceCountSpin.maximum = 128
         self.retrainSliceCountSpin.value = int(self._settings().value("MotionScore/RetrainSliceCount", 8) or 8)
         retrainForm.addRow("Slices Per Scan", self.retrainSliceCountSpin)
+
+        self.retrainIncludeAutoCheck = qt.QCheckBox("Include confident AI-only labels")
+        self.retrainIncludeAutoCheck.setChecked(bool(int(self._settings().value("MotionScore/RetrainIncludeAuto", 1) or 1)))
+        self.retrainIncludeAutoCheck.setToolTip("Include high-confidence automatic slice labels for scans without manual grades.")
+        retrainForm.addRow("Manifest Labels", self.retrainIncludeAutoCheck)
 
         self.retrainPatienceSpin = qt.QSpinBox()
         self.retrainPatienceSpin.minimum = 0
@@ -536,7 +544,7 @@ class MotionScoreHRpQCTWidget(ScriptedLoadableModuleWidget):
         self.retrainEpochsHeadSpin = qt.QSpinBox()
         self.retrainEpochsHeadSpin.minimum = 0
         self.retrainEpochsHeadSpin.maximum = 500
-        self.retrainEpochsHeadSpin.value = int(self._settings().value("MotionScore/RetrainEpochsHead", 10) or 10)
+        self.retrainEpochsHeadSpin.value = int(self._settings().value("MotionScore/RetrainEpochsHead", 20) or 20)
         retrainForm.addRow("Classifier Epochs", self.retrainEpochsHeadSpin)
 
         self.retrainEpochsFineSpin = qt.QSpinBox()
@@ -615,11 +623,13 @@ class MotionScoreHRpQCTWidget(ScriptedLoadableModuleWidget):
         self.deviceCombo.currentTextChanged.connect(self._persist_runtime_settings)
         self.runModeCombo.currentTextChanged.connect(self._persist_runtime_settings)
         self.modelProfileCombo.currentTextChanged.connect(self._persist_runtime_settings)
+        self.retrainBaseModelCombo.currentTextChanged.connect(self._persist_runtime_settings)
         self.profileModelCombo.currentTextChanged.connect(self.onProfileModelChanged)
         self.sliceStepSpin.valueChanged.connect(self._persist_runtime_settings)
         self.retrainModelIdEdit.editingFinished.connect(self._persist_runtime_settings)
         self.retrainDisplayNameEdit.editingFinished.connect(self._persist_runtime_settings)
         self.retrainSliceCountSpin.valueChanged.connect(self._persist_runtime_settings)
+        self.retrainIncludeAutoCheck.toggled.connect(self._persist_runtime_settings)
         self.retrainPatienceSpin.valueChanged.connect(self._persist_runtime_settings)
         self.retrainAugHFlipCheck.toggled.connect(self._persist_runtime_settings)
         self.retrainAugVFlipCheck.toggled.connect(self._persist_runtime_settings)
@@ -681,7 +691,10 @@ class MotionScoreHRpQCTWidget(ScriptedLoadableModuleWidget):
         self._settings().setValue("MotionScore/SliceStep", int(self.sliceStepSpin.value))
         self._settings().setValue("MotionScore/RetrainModelId", self.retrainModelIdEdit.text.strip())
         self._settings().setValue("MotionScore/RetrainDisplayName", self.retrainDisplayNameEdit.text.strip())
+        self._settings().setValue("MotionScore/RetrainBaseModel", self._selected_retrain_base_model_id())
         self._settings().setValue("MotionScore/RetrainSliceCount", int(self.retrainSliceCountSpin.value))
+        auto_attr = self.retrainIncludeAutoCheck.checked
+        self._settings().setValue("MotionScore/RetrainIncludeAuto", 1 if bool(auto_attr() if callable(auto_attr) else auto_attr) else 0)
         self._settings().setValue("MotionScore/RetrainPatience", int(self.retrainPatienceSpin.value))
         aug_h_attr = self.retrainAugHFlipCheck.checked
         aug_v_attr = self.retrainAugVFlipCheck.checked
@@ -833,6 +846,12 @@ class MotionScoreHRpQCTWidget(ScriptedLoadableModuleWidget):
             return str(data).strip()
         return "base-v1"
 
+    def _selected_retrain_base_model_id(self):
+        data = self._combo_data(self.retrainBaseModelCombo)
+        if data:
+            return str(data).strip()
+        return self._selected_model_id()
+
     def _selected_profile_model_id(self):
         data = self._combo_data(self.profileModelCombo)
         if data:
@@ -967,6 +986,7 @@ class MotionScoreHRpQCTWidget(ScriptedLoadableModuleWidget):
 
     def _refresh_model_profiles(self):
         previous = str(self._settings().value("MotionScore/ModelProfile", "base-v1") or "base-v1").strip()
+        previous_retrain = str(self._settings().value("MotionScore/RetrainBaseModel", previous) or previous).strip()
         models_dir = self._models_dir()
         profiles = []
         if models_dir is not None:
@@ -981,24 +1001,35 @@ class MotionScoreHRpQCTWidget(ScriptedLoadableModuleWidget):
 
         self._model_profiles = list(profiles)
         self.modelProfileCombo.blockSignals(True)
+        self.retrainBaseModelCombo.blockSignals(True)
         self.modelProfileCombo.clear()
+        self.retrainBaseModelCombo.clear()
         for entry in self._model_profiles:
             model_id = str(entry.get("model_id", "")).strip() or "base-v1"
             display = str(entry.get("display_name", "")).strip() or model_id
             version = str(entry.get("version", "")).strip()
             label = f"{display} ({model_id})" if not version else f"{display} ({model_id}@{version})"
             self.modelProfileCombo.addItem(label, model_id)
+            self.retrainBaseModelCombo.addItem(label, model_id)
         count_attr = self.modelProfileCombo.count
         count = int(count_attr() if callable(count_attr) else count_attr)
         if count == 0:
             self.modelProfileCombo.addItem("Base v1 (base-v1)", "base-v1")
+            self.retrainBaseModelCombo.addItem("Base v1 (base-v1)", "base-v1")
             count = 1
         for idx in range(count):
             data = str(self.modelProfileCombo.itemData(idx) or "").strip()
             if data == previous:
                 self.modelProfileCombo.setCurrentIndex(idx)
                 break
+        retrain_target = previous_retrain or previous or "base-v1"
+        for idx in range(count):
+            data = str(self.retrainBaseModelCombo.itemData(idx) or "").strip()
+            if data == retrain_target:
+                self.retrainBaseModelCombo.setCurrentIndex(idx)
+                break
         self.modelProfileCombo.blockSignals(False)
+        self.retrainBaseModelCombo.blockSignals(False)
 
     def _training_root(self):
         derivatives = self._derivatives_root()
@@ -1021,6 +1052,33 @@ class MotionScoreHRpQCTWidget(ScriptedLoadableModuleWidget):
         if models_root is None:
             return None
         return models_root / self._normalized_retrain_model_id()
+
+    def _retrain_continue_lr(self, output_model_dir):
+        metrics_path = Path(output_model_dir) / "training_metrics.json"
+        default_lr = 1e-4
+        if not metrics_path.exists():
+            return default_lr
+        try:
+            payload = json.loads(metrics_path.read_text(encoding="utf-8"))
+        except Exception:
+            return default_lr
+        try:
+            summary_lr = float(payload.get("lr_finetune", default_lr))
+        except Exception:
+            summary_lr = default_lr
+        models = payload.get("models", []) if isinstance(payload, dict) else []
+        for model in models:
+            points = list(model.get("plot_points", [])) if isinstance(model, dict) else []
+            for point in reversed(points):
+                if str(point.get("stage", "")).strip() != "finetune":
+                    continue
+                try:
+                    lr = float(point.get("lr", summary_lr))
+                except Exception:
+                    lr = summary_lr
+                if lr > 0.0:
+                    return lr
+        return summary_lr if summary_lr > 0.0 else default_lr
 
     def _update_training_plot(self, final=False):
         model_dir = self._training_output_model_dir
@@ -1206,6 +1264,7 @@ class MotionScoreHRpQCTWidget(ScriptedLoadableModuleWidget):
         self.trainingModeCheck.enabled = enabled
         self.runModeCombo.enabled = enabled
         self.modelProfileCombo.enabled = enabled
+        self.retrainBaseModelCombo.enabled = enabled
         self.sliceStepSpin.enabled = enabled
         self.runScopeCombo.enabled = enabled
         self.reviewScopeCombo.enabled = enabled
@@ -1217,6 +1276,7 @@ class MotionScoreHRpQCTWidget(ScriptedLoadableModuleWidget):
         self.continueTrainButton.enabled = enabled
         self.retrainModelIdEdit.enabled = enabled
         self.retrainDisplayNameEdit.enabled = enabled
+        self.retrainIncludeAutoCheck.enabled = enabled
         self.retrainSliceCountSpin.enabled = enabled
         self.retrainPatienceSpin.enabled = enabled
         self.retrainAugHFlipCheck.enabled = enabled
@@ -2061,6 +2121,9 @@ class MotionScoreHRpQCTWidget(ScriptedLoadableModuleWidget):
             "--slice-count",
             str(int(self.retrainSliceCountSpin.value)),
         ]
+        auto_attr = self.retrainIncludeAutoCheck.checked
+        if bool(auto_attr() if callable(auto_attr) else auto_attr):
+            args.append("--include-auto-without-manual")
         self._run_cli(args, on_finish=callback)
 
     def onPrepareRetrainManifest(self):
@@ -2084,7 +2147,7 @@ class MotionScoreHRpQCTWidget(ScriptedLoadableModuleWidget):
             "--device",
             (self._combo_text(self.deviceCombo) or "auto").lower(),
             "--epochs-head",
-            str(int(self.retrainEpochsHeadSpin.value)),
+            str(0 if continue_training else int(self.retrainEpochsHeadSpin.value)),
             "--epochs-finetune",
             str(0 if classifier_only else int(self.retrainEpochsFineSpin.value)),
             "--early-stopping-patience",
@@ -2092,8 +2155,9 @@ class MotionScoreHRpQCTWidget(ScriptedLoadableModuleWidget):
         ]
         if continue_training and any(output_model_dir.glob("DNN_*.pt")):
             args.extend(["--init-model-dir", str(output_model_dir)])
+            args.extend(["--lr-finetune", str(float(self._retrain_continue_lr(output_model_dir)))])
         else:
-            args.extend(["--model-root", str(models_root), "--init-model-id", self._selected_model_id()])
+            args.extend(["--model-root", str(models_root), "--init-model-id", self._selected_retrain_base_model_id()])
         aug_h_attr = self.retrainAugHFlipCheck.checked
         aug_v_attr = self.retrainAugVFlipCheck.checked
         aug_rotate_attr = self.retrainAugRotateCheck.checked
@@ -2128,7 +2192,7 @@ class MotionScoreHRpQCTWidget(ScriptedLoadableModuleWidget):
             "--display-name",
             display_name,
             "--source-model-id",
-            self._selected_model_id(),
+            self._selected_retrain_base_model_id(),
             "--training-manifest",
             str(self._retrain_manifest_path() or ""),
             "--metrics-path",
