@@ -1116,8 +1116,16 @@ class MotionScoreHRpQCTWidget(ScriptedLoadableModuleWidget):
             return
         mean_acc = sum(float(m.get("accuracy", 0.0)) for m in test_metrics) / float(len(test_metrics))
         mean_kappa = sum(float(m.get("weighted_kappa", 0.0)) for m in test_metrics) / float(len(test_metrics))
+        base_metrics = payload.get("base_model_test", {}) if isinstance(payload, dict) else {}
+        improvement = payload.get("test_improvement", {}) if isinstance(payload, dict) else {}
+        base_acc = float(base_metrics.get("accuracy", 0.0)) if base_metrics else 0.0
+        base_kappa = float(base_metrics.get("weighted_kappa", 0.0)) if base_metrics else 0.0
+        delta_acc = float(improvement.get("accuracy", mean_acc - base_acc))
+        delta_kappa = float(improvement.get("weighted_kappa", mean_kappa - base_kappa))
         self.trainingMetricsLabel.text = (
-            f"Holdout: models={len(test_metrics)} | accuracy={mean_acc:.3f} | weighted kappa={mean_kappa:.3f}"
+            f"Holdout: models={len(test_metrics)} | base acc={base_acc:.3f} -> retrain acc={mean_acc:.3f} "
+            f"(delta={delta_acc:+.3f}) | base kappa={base_kappa:.3f} -> retrain kappa={mean_kappa:.3f} "
+            f"(delta={delta_kappa:+.3f})"
         )
 
     def _derivatives_root(self):
@@ -2118,6 +2126,8 @@ class MotionScoreHRpQCTWidget(ScriptedLoadableModuleWidget):
             str(derivatives),
             "--output",
             str(manifest_path),
+            "--min-auto-confidence",
+            str(float(int(self.confidenceSpin.value)) / 100.0),
             "--slice-count",
             str(int(self.retrainSliceCountSpin.value)),
         ]
