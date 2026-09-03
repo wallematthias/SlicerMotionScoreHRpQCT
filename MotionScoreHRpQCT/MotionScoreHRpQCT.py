@@ -33,7 +33,7 @@ MODULE_VERSION = "0.1.3"
 DEFAULT_LICENSE_API = "https://motionscore-license-api.matthias-walle.workers.dev"
 LICENSE_HTTP_USER_AGENT = "MotionScoreSlicer/0.1 (+3D-Slicer; Python urllib)"
 CORE_PYPI_PACKAGE = "motionscorehrpqct"
-CORE_PIP_CONSTRAINTS = ("numpy<2.0",)
+CORE_PIP_CONSTRAINTS = ("numpy>=1.26,<3.0",)
 PROFILE_PLOT_LEFT_FRACTION = 0.11
 PROFILE_PLOT_RIGHT_FRACTION = 0.89
 TRAINING_PLOT_WIDTH = 760
