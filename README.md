@@ -68,6 +68,8 @@ The extension does not maintain ad hoc sidecar state; review state is read from 
 
 - The extension does not upload user data by default.
 - Network calls are only made when users explicitly trigger license setup/model download features.
+- Free registration is required to access the licensed model weights. Registration sends the licensing service your name, institution, and email address.
+- Activation sends the licensing service your email address, license key, and a device hash derived locally from the machine architecture, hostname and MAC address. The raw hostname and MAC address are not transmitted.
 - The extension does not include untrusted third-party binaries.
 - Model weights are licensed for usage tracking; in the current deployment flow, licenses are automatically granted at signup.
 

@@ -9,7 +9,6 @@ import os
 import platform
 import re
 import shutil
-import subprocess
 import sys
 import tarfile
 import uuid
@@ -54,6 +53,9 @@ class MotionScoreHRpQCT(ScriptedLoadableModule):
         parent.contributors = ["Matthias Walle"]
         parent.helpText = (
             "GUI wrapper for motionscore core CLI.\n"
+            "Free registration is required for model access. Registration sends name, "
+            "institution, and email. Activation sends a device hash derived from machine "
+            "architecture, hostname, and MAC address; the raw device identifiers are not sent.\n"
             f"Module version: {MODULE_VERSION}"
         )
         parent.acknowledgementText = "Built for streamlined HR-pQCT motion grading workflows."
@@ -254,8 +256,10 @@ class MotionScoreHRpQCTWidget(ScriptedLoadableModuleWidget):
         licenseLayout.addWidget(self.forceReinstallButton)
 
         self.licenseFlowHelpLabel = qt.QLabel(
-            "Fill Name/Institution/Email, click One-Click Setup. "
-            "It installs/updates core package, requests key, activates, and downloads models automatically."
+            "Free registration sends name, institution, and email. Activation sends a device hash "
+            "derived from machine architecture, hostname, and MAC address; raw device identifiers "
+            "are not transmitted. One-Click Setup installs or updates the core package, requests a "
+            "key, activates it, and downloads the models."
         )
         self.licenseFlowHelpLabel.setWordWrap(True)
         licenseLayout.addWidget(self.licenseFlowHelpLabel)
@@ -1196,38 +1200,18 @@ class MotionScoreHRpQCTWidget(ScriptedLoadableModuleWidget):
             return False
         return (form_email == self._license_session_email()) and (form_key == self._license_session_key())
 
-    def _python_executable_for_setup(self):
-        return (
-            shutil.which("PythonSlicer")
-            or (sys.executable if Path(sys.executable).exists() else None)
-            or shutil.which("python3")
-            or shutil.which("python")
-        )
-
     def _pip_install(self, *packages, upgrade=False, extra_args=None):
-        python_exe = self._python_executable_for_setup()
-        if not python_exe:
-            raise RuntimeError("Could not find Python executable for pip install.")
-        cmd = [python_exe, "-m", "pip", "install"]
+        install_args = []
         if upgrade:
-            cmd.append("--upgrade")
+            install_args.append("--upgrade")
         if extra_args:
-            cmd.extend(str(a) for a in extra_args if str(a).strip())
-        cmd.extend(str(p) for p in packages if str(p).strip())
-        if len(cmd) <= 4:
+            install_args.extend(str(a) for a in extra_args if str(a).strip())
+        install_args.extend(str(p) for p in packages if str(p).strip())
+        if not install_args:
             return
-        self._log(f"[setup] running: {' '.join(cmd)}\n")
-        completed = subprocess.run(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            check=False,
-        )
-        if completed.stdout:
-            self._log(completed.stdout)
-        if int(completed.returncode) != 0:
-            raise RuntimeError(f"pip install failed (exit {completed.returncode}).")
+        install_command = " ".join(install_args)
+        self._log(f"[setup] running Slicer pip install: {install_command}\n")
+        slicer.util.pip_install(install_command)
 
     def _core_pip_requirements(self):
         return [CORE_PYPI_PACKAGE, *CORE_PIP_CONSTRAINTS]
